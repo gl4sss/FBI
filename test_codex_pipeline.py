@@ -15,6 +15,7 @@ from detective.orchestrator import Detective
 from investigator.orchestrator import Orchestrator
 from investigator.main import run_analysis
 from lab.orchestrator import LabOrchestrator
+from report_generator import _render_html
 from shared.codex_client import extract_session_id, run_codex
 from shared.resume import load_completed_tasks, load_sent_task_ids
 from shared.prompting import analysis_input
@@ -315,7 +316,24 @@ class ValidationTests(unittest.TestCase):
         checked = validate_report(report, [{"task_id": "task_001", "evidence": ["offset 0x20"]}])
         self.assertEqual(len(checked["vulnerabilities"]), 1)
         self.assertEqual(checked["vulnerabilities"][0]["evidence"], "offset 0x20")
+        self.assertEqual(checked["vulnerabilities"][0]["verification_status"], "재현 미실시")
         self.assertEqual(checked["overall_risk"], "High")
+
+    def test_report_has_fixed_sections_and_marks_unverified_risk(self):
+        tasks = [{"task_id": "task_001", "status": "partial", "evidence": ["offset 0x20"]}]
+        report = validate_report({"vulnerabilities": [
+            {"source_task": "task_001", "severity": "high", "title": "Test finding"}
+        ]}, tasks)
+        data = {"session_path": "sessions/sample", "firmware_info": {
+            "filename": "sample.bin", "size_bytes": 6, "hashes": {}
+        }, "completed_tasks": tasks}
+        html = _render_html(data, report)
+
+        for section in range(1, 10):
+            self.assertIn(f"<h2>{section}.", html)
+        self.assertIn("잠정 평가", html)
+        self.assertIn("재현 미실시", html)
+        self.assertIn("부분 완료 또는 실패한 작업 1건", html)
 
 
 if __name__ == "__main__":

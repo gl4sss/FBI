@@ -13,6 +13,8 @@ FBI는 Codex CLI로 펌웨어 바이너리를 분석하는 로컬 도구입니�
 | [`shared/`](shared/README.md) | Codex 실행, 세션 로그, MCP 설정 등 공통 코드 |
 | `qa.py` | 저장된 세션을 사용한 질의응답 |
 | `report_generator.py` | 세션 기반 한국어 HTML 보고서 생성 |
+| [`REPORT_FORMAT.md`](REPORT_FORMAT.md) | 보고서 목차와 검증 상태 기준 |
+| [`LICENSE`](LICENSE) | Apache License 2.0 전문 |
 
 ## 준비
 
@@ -47,3 +49,7 @@ python3 report_generator.py --session path/to/session
 `main.py`는 기존 명령 호환용 진입점이며 `investigator/main.py`로 연결됩니다. 각 명령의 옵션은 `--help`에서 확인할 수 있습니다.
 
 실행 중 생성되는 `sessions/`, `report/`, `poc_artifacts/`, `kill_chain_artifacts/` 등은 `.gitignore`에 등록되어 있습니다. 분석 대상 바이너리와 분석 결과를 공개하려면 권리 및 민감정보를 별도로 확인하세요.
+
+## 라이선스
+
+저장소의 코드와 문서는 [Apache License 2.0](LICENSE)에 따라 배포합니다. 분석 대상 펌웨어와 제3자 자료에는 이 라이선스를 적용하지 않습니다.

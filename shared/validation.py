@@ -110,16 +110,46 @@ def validate_report(report: dict, completed_tasks: list[dict]) -> dict:
         raise ValueError("Report needs a vulnerabilities list")
     sources = {task["task_id"]: task for task in completed_tasks if task.get("task_id")}
     accepted = []
+    omitted = 0
     for vulnerability in report["vulnerabilities"]:
         if not isinstance(vulnerability, dict):
+            omitted += 1
             continue
         source = sources.get(vulnerability.get("source_task"))
         evidence = source.get("evidence") if source else None
-        if not isinstance(evidence, list) or not evidence:
+        if (not isinstance(evidence, list) or not evidence or
+                any(not isinstance(item, str) for item in evidence)):
+            omitted += 1
             continue
         vulnerability["evidence"] = "; ".join(evidence)
+        if vulnerability.get("severity") not in {"critical", "high", "medium", "low", "info"}:
+            vulnerability["severity"] = "info"
+        assessment = source.get("vdp_assessment")
+        test = source.get("test_results")
+        assessment = assessment if isinstance(assessment, dict) else {}
+        test = test if isinstance(test, dict) else {}
+        if test.get("executed") is True and test.get("evidence") and assessment.get("trigger_confirmed") is True:
+            vulnerability["verification_status"] = "재현 확인"
+        elif test.get("executed") is True:
+            vulnerability["verification_status"] = "이번 테스트 미재현"
+        else:
+            vulnerability["verification_status"] = "재현 미실시"
         accepted.append(vulnerability)
     report["vulnerabilities"] = accepted
+    limitations = report.get("limitations")
+    if not isinstance(limitations, list):
+        limitations = []
+    limitations = [item for item in limitations if isinstance(item, str) and item.strip()]
+    if not completed_tasks:
+        limitations.append("저장된 작업 결과가 없어 발견사항을 검증할 수 없습니다.")
+    elif not any(v["verification_status"] == "재현 확인" for v in accepted):
+        limitations.append("실행 결과와 증거로 확인된 취약점 트리거가 없습니다.")
+    unfinished = sum(task.get("status") in {"partial", "failed"} for task in completed_tasks)
+    if unfinished:
+        limitations.append(f"부분 완료 또는 실패한 작업 {unfinished}건은 검증이 끝나지 않았습니다.")
+    if omitted:
+        limitations.append(f"출처 작업 또는 관찰 근거가 없는 발견사항 {omitted}건을 제외했습니다.")
+    report["limitations"] = list(dict.fromkeys(limitations))
     severity_order = ["critical", "high", "medium", "low", "info"]
     risk_names = {"critical": "Critical", "high": "High", "medium": "Medium",
                   "low": "Low", "info": "Informational"}
