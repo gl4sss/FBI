@@ -1,0 +1,29 @@
+{
+  "orchestrator": {
+    "model": "gpt-6-sol",
+    "reasoning_effort": "medium"
+  },
+  "worker": {
+    "model": "gpt-6-sol",
+    "parallel_limit": 2,
+    "bypass_approvals": false,
+    "sandbox_permissions": [],
+    "network_access": false,
+    "reasoning_effort": "high"
+  },
+  "analysis": {
+    "max_iterations": 8,
+    "sessions_dir": "./sessions/assistant"
+  },
+  "exploit": {
+    "output_dir": "./kill_chain_artifacts",
+    "test_timeout": 120
+  },
+  "mcp": {
+    "apply_to": [
+      "orchestrator",
+      "worker"
+    ],
+    "servers": []
+  }
+}

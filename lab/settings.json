@@ -1,0 +1,35 @@
+{
+  "orchestrator": {
+    "model": "gpt-6-sol",
+    "reasoning_effort": "medium"
+  },
+  "worker": {
+    "model": "gpt-6-sol",
+    "parallel_limit": 2,
+    "bypass_approvals": false,
+    "sandbox_permissions": [],
+    "network_access": false,
+    "reasoning_effort": "high"
+  },
+  "analysis": {
+    "max_iterations": 8,
+    "sessions_dir": "./sessions/lab"
+  },
+  "environment": {
+    "output_dir": "./lab_environments",
+    "qemu_boot_timeout": 60,
+    "gdb_port": 1234,
+    "telnet_port_start": 4444,
+    "monitor_port_start": 4445,
+    "http_forward_port": 8080,
+    "ssh_forward_port": 2222,
+    "rootfs_base": "/tmp/fbi_lab"
+  },
+  "mcp": {
+    "apply_to": [
+      "orchestrator",
+      "worker"
+    ],
+    "servers": []
+  }
+}

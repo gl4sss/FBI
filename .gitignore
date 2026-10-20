@@ -1,0 +1,36 @@
+# Python and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# Local analysis sessions and generated output
+/sessions/
+/lab_environments/
+/report/
+/report.tmp
+/poc/
+/poc_artifacts/
+/kill_chain_artifacts/
+
+# Local tools, machine settings, and third-party archives
+/firmware/
+/.codex/
+/.vscode/
+/ida_mcp_setting
+/jadx-mcp-server/
+/pibackup.zip
+*.bin
+*.dat
+*.zip
+*.deb
+*.elf
+*.hex
+*.img
+*.apk
