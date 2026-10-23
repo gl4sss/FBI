@@ -25,7 +25,7 @@ FBI는 Codex CLI로 펌웨어 바이너리를 분석하는 로컬 도구입니�
 
 각 단계의 `settings.json`은 `gpt-6-sol`을 기본 모델로 사용합니다. 오케스트레이션의 추론 수준은 `medium`, 분석 워커는 `high`입니다. `qa.py`와 `report_generator.py`도 기본적으로 `high`를 사용합니다. MCP 서버 목록은 비어 있으며, 필요한 서버는 설정의 `mcp.servers`에 추가할 수 있습니다.
 
-Investigator 워커는 읽기 전용, Detective·Lab·Assistant 워커는 작업 공간 쓰기 권한으로 실행합니다. 워커의 네트워크 접근은 기본적으로 꺼져 있습니다. 재현 대상에 접속해야 하는 경우 해당 단계의 `settings.json`에서 `worker.network_access`를 `true`로 설정하세요. 세션을 재개할 때도 같은 권한 설정이 적용됩니다. 워커 결과의 `evidence`는 관찰 근거, `inferences`는 아직 검증되지 않은 해석을 뜻합니다.
+Investigator 워커는 세션 디렉터리를 작업 루트로 삼아 분석 산출물을 작성할 수 있고, Detective·Lab·Assistant 워커도 작업 공간 쓰기 권한으로 실행합니다. 워커의 네트워크 접근은 기본적으로 꺼져 있습니다. Investigator는 `--allow-network-research`로 외부 자료 조회를 허용할 수 있으며, 다른 단계는 해당 `settings.json`의 `worker.network_access`를 변경할 수 있습니다. 세션을 재개할 때도 같은 권한 설정이 적용됩니다. 워커 결과의 `evidence`는 관찰 근거, `inferences`는 아직 검증되지 않은 해석을 뜻합니다.
 Investigator·Lab·Assistant의 재개 실행은 기존 세션 디렉터리에 작업 결과를 이어서 기록합니다. Investigator와 Lab은 펌웨어 SHA256이 이전 세션과 일치하는지 확인합니다.
 Investigator는 기본 정보 수집 후 세션의 `extracted/`에 펌웨어를 추출합니다. 실제 추출 파일이 확인되면 그 경로를 오케스트레이터와 워커에 전달해 분석을 시작합니다. 추출 도구가 없거나 추출 결과가 비어 있으면 분석을 시작하지 않고 `extraction.json`에 이유를 기록합니다. 재개할 때는 검증된 추출 결과를 다시 사용합니다.
 
