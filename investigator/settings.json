@@ -6,13 +6,18 @@
   "worker": {
     "model": "gpt-6-sol",
     "parallel_limit": 3,
+    "sandbox": "workspace-write",
     "bypass_approvals": false,
     "sandbox_permissions": [],
     "network_access": false,
     "reasoning_effort": "high"
   },
   "analysis": {
-    "max_iterations": 8,
+    "max_iterations": 12,
+    "extraction_timeout_sec": 300,
+    "scan_files_per_task": 4,
+    "deep_research_enabled": true,
+    "research_minutes": 0,
     "sessions_dir": "./sessions/investigator"
   },
   "report": {

@@ -31,6 +31,7 @@ def run_codex(
     bypass_approvals: bool = False,
     sandbox_permissions: list[str] | None = None,
     network_access: bool = False,
+    workdir: str | None = None,
 ) -> tuple[str, str | None]:
     """Run one turn without putting the prompt in the process argument list."""
     if reasoning_effort not in {"low", "medium", "high", "xhigh", "max"}:
@@ -67,9 +68,10 @@ def run_codex(
                 ])
         command.append("-")
 
-        result = subprocess.run(
-            command, input=prompt, capture_output=True, text=True
-        )
+        run_options = {"input": prompt, "capture_output": True, "text": True}
+        if workdir is not None:
+            run_options["cwd"] = workdir
+        result = subprocess.run(command, **run_options)
         if result.returncode != 0:
             raise RuntimeError(f"Codex exited {result.returncode}: {result.stderr[:500]}")
         if not output_file.exists():

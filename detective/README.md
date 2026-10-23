@@ -1,6 +1,6 @@
 # Detective
 
-Investigator 세션의 발견사항을 읽고 재현 가능성을 검토합니다. 설정에 따라 QEMU를 실행하고 결과와 재현 절차를 세션에 기록합니다.
+Investigator 세션의 의심 위치와 심층 조사 기록을 읽고 재현 가능성을 검토합니다. 일반 요약 문자열이 비어 있어도 `suspected_findings`의 위치별 기록을 가져옵니다. 대화형 `/goal` 조사가 `research_artifacts/detective_handoff.md`를 남겼다면 그것도 입력으로 사용합니다. 설정에 따라 QEMU를 실행하고 결과와 재현 절차를 세션에 기록합니다.
 
 ```bash
 python3 detective/main.py --session path/to/investigator-session --no-qemu

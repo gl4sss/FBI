@@ -24,7 +24,9 @@ from detective.qemu_runner import QemuRunner
 from detective.worker import PocWorker
 from shared.logger import ConversationLogger
 from shared.mcp_manager import McpManager
+from shared.resume import load_completed_tasks
 from shared.session_manager import SessionManager
+from shared.validation import collect_report_candidates
 
 
 def load_settings(path: str) -> dict:
@@ -45,34 +47,51 @@ def load_investigator_session(session_dir: str) -> tuple[dict, list, str]:
         with open(fi_path, encoding="utf-8") as f:
             firmware_info = json.load(f)
 
+    saved_tasks = []
+    for saved in load_completed_tasks(session_dir):
+        result = saved.get("result") or {}
+        if isinstance(result, dict):
+            saved_tasks.append({"task_id": saved["task_id"],
+                                "type": saved.get("type"), **result})
+    research = {item["source_finding_id"]: item
+                for task in saved_tasks
+                if isinstance(task.get("investigation"), dict)
+                for item in [task["investigation"]]
+                if item.get("source_finding_id")}
+    candidates = collect_report_candidates(saved_tasks)
     vulnerabilities = []
-    codex_dir = sp / "codex_sessions"
-    if codex_dir.exists():
-        for jf in sorted(codex_dir.glob("*.jsonl")):
-            with open(jf, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    entry = json.loads(line)
-                    if entry.get("role") != "assistant":
-                        continue
-                    c = entry.get("content", {})
-                    tid = c.get("task_id", "unknown")
-                    findings = c.get("findings", [])
-                    follow_up = c.get("follow_up_needed", False)
-
-                    if findings or follow_up:
-                        vulnerabilities.append({
-                            "source_task": tid,
-                            "findings": findings,
-                            "evidence": c.get("evidence", []),
-                            "inferences": c.get("inferences", []),
-                            "recommendations": c.get("recommendations", []),
-                            "analysis_snippet": (c.get("analysis") or "")[:600],
-                            "follow_up_needed": follow_up,
-                            "follow_up_reason": c.get("follow_up_reason"),
-                        })
+    for candidate in candidates:
+        source = next(task for task in saved_tasks
+                      if task["task_id"] == candidate["source_task"])
+        vulnerabilities.append({
+            "source_task": candidate["source_task"],
+            "source_finding_id": candidate["finding_id"],
+            "location": candidate["location"],
+            "title": candidate["title"],
+            "findings": [candidate["title"]],
+            "evidence": candidate["evidence"],
+            "inferences": [candidate["inference"]] if candidate["inference"] else [],
+            "recommendations": [candidate["recommendation"]] if candidate["recommendation"] else [],
+            "analysis_snippet": (source.get("analysis") or "")[:1200],
+            "follow_up_needed": source.get("follow_up_needed", False),
+            "follow_up_reason": source.get("follow_up_reason"),
+            "research": research.get(candidate["finding_id"]),
+        })
+    represented = {candidate["source_task"] for candidate in candidates}
+    for task in saved_tasks:
+        if task["task_id"] in represented:
+            continue
+        if task.get("findings") or task.get("follow_up_needed"):
+            vulnerabilities.append({
+                "source_task": task["task_id"],
+                "findings": task.get("findings") or [],
+                "evidence": task.get("evidence") or [],
+                "inferences": task.get("inferences") or [],
+                "recommendations": task.get("recommendations") or [],
+                "analysis_snippet": (task.get("analysis") or "")[:1200],
+                "follow_up_needed": task.get("follow_up_needed", False),
+                "follow_up_reason": task.get("follow_up_reason"),
+            })
 
     orchestrator_summary = ""
     cl_path = sp / "orchestrator_conversation.jsonl"
@@ -320,6 +339,15 @@ def run_detective(investigator_session: str, settings: dict,
     print(f"[*] Investigator 세션: {investigator_session}")
 
     firmware_info, vulnerabilities, inv_summary = load_investigator_session(investigator_session)
+    research_status_path = Path(investigator_session) / "research_status.json"
+    investigator_research_status = (
+        json.loads(research_status_path.read_text(encoding="utf-8"))
+        if research_status_path.exists() else {}
+    )
+    goal_handoff_path = (Path(investigator_session) / "research_artifacts" /
+                         "detective_handoff.md")
+    goal_handoff = (goal_handoff_path.read_text(encoding="utf-8")[:20000]
+                    if goal_handoff_path.exists() else "")
 
     if not firmware_path:
         firmware_path = firmware_info.get("path", "")
@@ -400,6 +428,8 @@ def run_detective(investigator_session: str, settings: dict,
         },
         "architecture": firmware_info.get("file_type", "unknown"),
         "investigator_summary": inv_summary,
+        "investigator_research_status": investigator_research_status,
+        "goal_handoff": goal_handoff,
         "vulnerabilities": vulnerabilities,
         "qemu": {
             "available": qemu_info.get("started", False),
@@ -407,10 +437,13 @@ def run_detective(investigator_session: str, settings: dict,
             "connection_info": qemu_info.get("connection_info"),
         },
         "objective": (
-            "Assess each candidate for CVE/VDP submission using observed evidence. "
-            "Test triggers where the target and permissions allow; record inconclusive cases. "
-            "Estimate CVSS v3.1 only when the required conditions are known. "
-            "Write Korean reproduction steps for verified tests and label untested steps clearly."
+            "Assess every Investigator candidate for CVE/VDP submission using its site, "
+            "evidence, research assessment, and unknowns. Test triggers where the target "
+            "and permissions allow; record inconclusive cases. If there are no candidates, "
+            "audit the Investigator coverage gaps and extracted attack surface before "
+            "concluding that no PoC work is possible. Estimate CVSS v3.1 only when the "
+            "required conditions are known. Write Korean reproduction steps for verified "
+            "tests and label untested steps clearly."
         ),
     }
 

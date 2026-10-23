@@ -9,16 +9,22 @@ Usage:
 """
 import argparse
 import json
+import math
 import os
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from investigator.firmware_utils import analyze_firmware
+from investigator.extractor import ExtractionError, extract_firmware
+from investigator.deep_research import baseline_tasks, finding_research_tasks
 from investigator.orchestrator import Orchestrator
 from investigator.patch_differ import PatchDiffer
+from investigator.scan_scope import save_scan_scope, scan_tasks
 from investigator.worker import Worker
 from shared.logger import ConversationLogger
 from shared.mcp_manager import McpManager
@@ -91,7 +97,7 @@ def load_resume_state(session_dir: str) -> tuple[list, dict | None, int, str | N
     return completed_tasks, pending_roadmap, used_iterations, orchestrator_session_id
 
 
-def _dispatch_tasks(new_tasks, worker, session_mgr, firmware_path, logger,
+def _dispatch_tasks(new_tasks, worker, session_mgr, firmware_path, extracted_dir, logger,
                     parallel_limit, cfg_worker) -> list[dict]:
     """new_tasks를 Codex 워커에 병렬 전송하고 completed 형태로 반환."""
     task_results: dict[str, dict] = {}
@@ -102,7 +108,8 @@ def _dispatch_tasks(new_tasks, worker, session_mgr, firmware_path, logger,
             existing_sid = session_mgr.get_session_id(
                 task["task_id"], task.get("reuse_session_for")
             )
-            fut = executor.submit(worker.execute, task, existing_sid, firmware_path)
+            fut = executor.submit(worker.execute, task, existing_sid, firmware_path,
+                                  extracted_dir)
             futures[fut] = task
 
         for fut in as_completed(futures):
@@ -110,18 +117,32 @@ def _dispatch_tasks(new_tasks, worker, session_mgr, firmware_path, logger,
             task_id = task["task_id"]
             try:
                 result = fut.result()
+                scoped_files = task.get("scope_files") or []
+                if scoped_files:
+                    reviewed = set(result.get("reviewed_files") or [])
+                    missing = [path for path in scoped_files if path not in reviewed]
+                    if missing:
+                        if result.get("status") == "completed":
+                            result["status"] = "partial"
+                        result["follow_up_needed"] = True
+                        result["follow_up_reason"] = (
+                            f"Scoped files not reviewed: {', '.join(missing)}"
+                        )
                 sid = result.get("session_id") or f"unknown_{task_id}"
                 session_mgr.register_session(task_id, sid, task.get("type", ""))
                 task_results[task_id] = result
 
                 status_str = result.get("status", "?")
                 findings = result.get("findings") or []
+                suspected = result.get("suspected_findings") or []
                 short_sid = sid[:8] if len(sid) >= 8 else sid
                 print(f"\n[Codex] {task_id}  status={status_str}  session={short_sid}...")
                 if findings:
                     print(f"        Findings ({len(findings)}):")
                     for item in findings[:4]:
                         print(f"          - {str(item)[:120]}")
+                if suspected:
+                    print(f"        Suspicious sites: {len(suspected)}")
                 analysis_short = (result.get("analysis") or "")[:200]
                 if analysis_short:
                     print(f"        Analysis: {analysis_short}...")
@@ -152,6 +173,9 @@ def _dispatch_tasks(new_tasks, worker, session_mgr, firmware_path, logger,
 
 def run_analysis(firmware_path: str, settings: dict, resume_from: str | None = None,
                  patched_firmware_path: str | None = None):
+    firmware_path = str(Path(firmware_path).resolve())
+    if patched_firmware_path:
+        patched_firmware_path = str(Path(patched_firmware_path).resolve())
     cfg_analysis = settings["analysis"]
     cfg_orch = settings["orchestrator"]
     cfg_worker = settings["worker"]
@@ -159,6 +183,11 @@ def run_analysis(firmware_path: str, settings: dict, resume_from: str | None = N
     sessions_dir = cfg_analysis["sessions_dir"]
     max_iterations = cfg_analysis["max_iterations"]
     parallel_limit = cfg_worker["parallel_limit"]
+    if parallel_limit < 1:
+        raise ValueError("worker.parallel_limit must be positive")
+    research_minutes = float(cfg_analysis.get("research_minutes", 0))
+    if not math.isfinite(research_minutes) or research_minutes < 0:
+        raise ValueError("analysis.research_minutes must be a finite nonnegative number")
 
     firmware_name = Path(firmware_path).stem
     logger = ConversationLogger(sessions_dir, firmware_name, resume_from=resume_from)
@@ -169,7 +198,6 @@ def run_analysis(firmware_path: str, settings: dict, resume_from: str | None = N
     firmware_info = analyze_firmware(firmware_path)
     if resume_from:
         verify_resume_firmware(resume_from, firmware_info)
-    logger.save_firmware_info(firmware_info)
     print(f"    Type  : {firmware_info['file_type']}")
     print(f"    Size  : {firmware_info['size_bytes']:,} bytes")
     print(f"    MD5   : {firmware_info['hashes']['md5']}")
@@ -177,6 +205,25 @@ def run_analysis(firmware_path: str, settings: dict, resume_from: str | None = N
     print(f"    Strings: {len(firmware_info['strings_sample'])} strings (sample)")
     if firmware_info["binwalk"]:
         print(f"    Binwalk: {len(firmware_info['binwalk'].splitlines())} lines")
+
+    _bar("Firmware Extraction")
+    extraction = extract_firmware(
+        firmware_path, logger.get_session_path(),
+        firmware_info["hashes"]["sha256"],
+        timeout=cfg_analysis.get("extraction_timeout_sec", 300),
+    )
+    firmware_info["extraction"] = extraction
+    logger.save_firmware_info(firmware_info)
+    if extraction["status"] != "complete":
+        raise ExtractionError(extraction["error"])
+    extracted_dir = str(Path(extraction["output_dir"]).resolve())
+    print(f"[*] Extracted files: {extraction['file_count']}")
+    print(f"[*] Extracted directory: {extracted_dir}")
+    if extraction.get("reused"):
+        print("[*] Reused verified extraction from this session")
+    started_at = datetime.now(timezone.utc)
+    started_clock = time.monotonic()
+    deadline = started_clock + research_minutes * 60 if research_minutes else None
 
     # 패치 펌웨어가 제공된 경우 diff 수행
     if patched_firmware_path:
@@ -188,6 +235,7 @@ def run_analysis(firmware_path: str, settings: dict, resume_from: str | None = N
             differ = PatchDiffer(work_dir=work_dir)
             patch_diff = differ.diff(firmware_path, patched_firmware_path)
             firmware_info["patch_diff"] = patch_diff
+            logger.save_firmware_info(firmware_info)
 
             # diff 요약 저장
             diff_out = logger.get_session_path() / "patch_diff.json"
@@ -244,12 +292,82 @@ def run_analysis(firmware_path: str, settings: dict, resume_from: str | None = N
         bypass_approvals=cfg_worker.get("bypass_approvals", False),
         sandbox_permissions=cfg_worker.get("sandbox_permissions", []),
         network_access=cfg_worker.get("network_access", False),
+        sandbox=cfg_worker.get("sandbox", "read-only"),
         logger=logger,
     )
+    (logger.get_session_path() / "research_artifacts").mkdir(exist_ok=True)
     session_mgr = SessionManager()
     session_mgr.restore(completed_tasks)
 
-    while iteration < max_iterations:
+    sweep_tasks, code_files = scan_tasks(
+        extracted_dir, files_per_task=cfg_analysis.get("scan_files_per_task", 4)
+    )
+    scope_path = logger.get_session_path() / "scan_scope.json"
+    if resume_from and scope_path.exists():
+        previous_scope = json.loads(scope_path.read_text(encoding="utf-8"))
+        if previous_scope.get("targets") != code_files:
+            raise ExtractionError("extracted code files changed since the saved scan scope")
+    else:
+        save_scan_scope(logger.get_session_path(), sweep_tasks, code_files)
+    goal_prompt = logger.get_session_path() / "GOAL_PROMPT.txt"
+    goal_network_rule = (
+        "Consult primary vendor or project sources when useful, but never upload firmware "
+        "or extracted content. " if cfg_worker.get("network_access", False) else
+        "Do not use the network or live targets without separate authorization. "
+    )
+    goal_prompt.write_text(
+        "/goal Produce an evidence-backed security audit of the extracted firmware in "
+        f"{logger.get_session_path().resolve()}. Read firmware_info.json, scan_scope.json, "
+        "task_results.jsonl, and the extracted files. For every suspicious location, "
+        "check its entry point, data flow, guards, counterevidence, impact, and remaining "
+        "unknowns. Review configuration and component risks even if the first code scan "
+        "found nothing. Save a Korean audit to research_artifacts/audit.md and a "
+        "prioritized Detective handoff to research_artifacts/detective_handoff.md. "
+        "For each handoff candidate include the exact code location, observed evidence, "
+        "reachability conditions, counterevidence, and the next safe verification. "
+        "Cite exact local files and offsets; distinguish static "
+        "evidence from executed verification. Keep original firmware and extracted files "
+        f"unchanged. {goal_network_rule}"
+        "Finish when each candidate has an evidence-backed disposition or an explicit "
+        "blocker, and the remaining coverage limits are recorded.\n",
+        encoding="utf-8",
+    )
+    print(f"[*] Interactive Codex /goal prompt: {goal_prompt}")
+    completed_ids = {task.get("task_id") for task in completed_tasks}
+    pending_sweep = [task for task in sweep_tasks
+                     if task["task_id"] not in completed_ids]
+    print(f"[*] Code files in scan scope: {len(code_files)}; "
+          f"pending review tasks: {len(pending_sweep)}")
+    def budget_available() -> bool:
+        return deadline is None or time.monotonic() < deadline
+
+    def dispatch_stage(tasks: list[dict], label: str) -> None:
+        for start in range(0, len(tasks), parallel_limit):
+            if not budget_available():
+                return
+            batch = tasks[start:start + parallel_limit]
+            _bar(f"{label}  |  tasks {start + 1}-{start + len(batch)}")
+            completed_tasks.extend(_dispatch_tasks(
+                batch, worker, session_mgr, firmware_path, extracted_dir, logger,
+                parallel_limit, cfg_worker,
+            ))
+
+    dispatch_stage(pending_sweep, "Code Review Sweep")
+
+    pending_baseline = []
+    pending_finding_research = []
+    if cfg_analysis.get("deep_research_enabled", True):
+        completed_ids = {task.get("task_id") for task in completed_tasks}
+        pending_baseline = [task for task in baseline_tasks()
+                            if task["task_id"] not in completed_ids]
+        dispatch_stage(pending_baseline, "System Research")
+        completed_ids = {task.get("task_id") for task in completed_tasks}
+        pending_finding_research = [task for task in finding_research_tasks(completed_tasks)
+                                    if task["task_id"] not in completed_ids]
+        dispatch_stage(pending_finding_research, "Finding Research")
+
+    stop_reason = "iteration_limit"
+    while iteration < max_iterations and budget_available():
         iteration += 1
 
         if first_roadmap is not None:
@@ -264,6 +382,7 @@ def run_analysis(firmware_path: str, settings: dict, resume_from: str | None = N
                 roadmap = orchestrator.decide(firmware_info, completed_tasks)
             except Exception as exc:
                 print(f"[!] Orchestrator error: {exc}")
+                stop_reason = "orchestrator_error"
                 break
             logger.save_roadmap(roadmap)
 
@@ -273,6 +392,7 @@ def run_analysis(firmware_path: str, settings: dict, resume_from: str | None = N
         print(f"[Orchestrator] Status: {status}")
 
         if status == "complete":
+            stop_reason = "evidence_complete"
             _bar("Analysis Complete")
             conclusion = roadmap.get("conclusion")
             if conclusion:
@@ -282,6 +402,7 @@ def run_analysis(firmware_path: str, settings: dict, resume_from: str | None = N
         new_tasks = roadmap.get("new_tasks") or []
         if not new_tasks:
             print("[!] Codex returned no new tasks. Stopping.")
+            stop_reason = "no_new_tasks"
             break
 
         print(f"\n[Orchestrator] Tasks dispatched ({len(new_tasks)}):")
@@ -295,11 +416,31 @@ def run_analysis(firmware_path: str, settings: dict, resume_from: str | None = N
 
         _bar(f"Codex Workers  |  model={cfg_worker['model']}  |  parallel={parallel_limit}")
 
-        newly = _dispatch_tasks(
-            new_tasks, worker, session_mgr, firmware_path, logger,
-            parallel_limit, cfg_worker,
-        )
-        completed_tasks.extend(newly)
+        dispatch_stage(new_tasks, "Codex Workers")
+
+    if not budget_available() and stop_reason != "evidence_complete":
+        stop_reason = "time_budget_reached"
+        print("[*] Research time budget reached; remaining work is recorded for resume")
+
+    stage_ids = {task.get("task_id") for task in completed_tasks}
+    all_finding_tasks = (finding_research_tasks(completed_tasks)
+                         if cfg_analysis.get("deep_research_enabled", True) else [])
+    research_status = {
+        "started_at": started_at.isoformat(),
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+        "requested_minutes": research_minutes,
+        "elapsed_seconds": round(time.monotonic() - started_clock, 2),
+        "stop_reason": stop_reason,
+        "code_tasks_recorded": sum(task["task_id"] in stage_ids for task in sweep_tasks),
+        "code_tasks_total": len(sweep_tasks),
+        "baseline_tasks_recorded": sum(task["task_id"] in stage_ids for task in baseline_tasks())
+        if cfg_analysis.get("deep_research_enabled", True) else 0,
+        "finding_tasks_recorded": sum(task["task_id"] in stage_ids for task in all_finding_tasks),
+        "finding_tasks_planned": len(all_finding_tasks),
+    }
+    (logger.get_session_path() / "research_status.json").write_text(
+        json.dumps(research_status, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
 
     _bar("Session Complete")
@@ -332,6 +473,12 @@ def main():
         description="FBI Investigator — Codex 기반 펌웨어 취약점 분석"
     )
     parser.add_argument("firmware", help="분석 대상 펌웨어 바이너리 경로 (구버전/취약 버전)")
+    parser.add_argument("--research-minutes", type=float, default=None,
+                        help="이번 실행의 리서치 시간 예산(분). 진행 중인 작업은 완료 후 중단")
+    parser.add_argument("--max-iterations", type=int, default=None,
+                        help="세션의 최대 오케스트레이터 반복 횟수 재설정")
+    parser.add_argument("--allow-network-research", action="store_true",
+                        help="워커의 외부 1차 자료 조회 허용(펌웨어 업로드 금지)")
     parser.add_argument("--settings", default=default_settings, help="settings.json 경로")
     parser.add_argument(
         "--resume",
@@ -366,8 +513,20 @@ def main():
         sys.exit(1)
 
     settings = load_settings(str(cfg_path))
-    run_analysis(str(fw), settings, resume_from=args.resume,
-                 patched_firmware_path=args.patched)
+    if args.research_minutes is not None:
+        settings["analysis"]["research_minutes"] = args.research_minutes
+    if args.max_iterations is not None:
+        if args.max_iterations < 1:
+            parser.error("--max-iterations must be positive")
+        settings["analysis"]["max_iterations"] = args.max_iterations
+    if args.allow_network_research:
+        settings["worker"]["network_access"] = True
+    try:
+        run_analysis(str(fw), settings, resume_from=args.resume,
+                     patched_firmware_path=args.patched)
+    except ExtractionError as exc:
+        print(f"Error: firmware extraction failed: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
