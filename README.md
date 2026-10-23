@@ -16,6 +16,45 @@ FBI는 Codex CLI로 펌웨어 바이너리를 분석하는 로컬 도구입니�
 | [`REPORT_FORMAT.md`](REPORT_FORMAT.md) | 보고서 목차와 검증 상태 기준 |
 | [`LICENSE`](LICENSE) | Apache License 2.0 전문 |
 
+## 전체 흐름
+
+```mermaid
+flowchart LR
+    FW["분석 대상 펌웨어"] --> INV["Investigator<br/>추출·정적 조사"]
+    FW --> LAB["Lab<br/>동적 분석 환경 구성"]
+    INV -->|"의심 위치와 조사 기록"| DET["Detective<br/>재현 가능성 검토"]
+    DET -->|"검증된 결과"| AST["Assistant<br/>공격 체인 분석"]
+    INV --> IR["Investigator 세션"]
+    DET --> DR["Detective 세션"]
+    LAB --> LR["Lab 세션"]
+    AST --> AR["Assistant 세션·공격 체인 보고서"]
+    IR --> REP["report_generator.py<br/>HTML 보고서"]
+    DR --> REP
+    IR --> QA["qa.py<br/>세션 질의응답"]
+    DR --> QA
+    SH["shared/<br/>Codex 호출·기록·검증·재개"] -.-> INV
+    SH -.-> DET
+    SH -.-> LAB
+    SH -.-> AST
+```
+
+Investigator가 분석의 시작점입니다. Detective와 Assistant는 각각 앞 단계의 세션을 명시적으로 입력받아 실행하며, Lab은 같은 펌웨어에 대해 별도로 실행합니다. Investigator와 Detective는 HTML 보고서를 자동 생성합니다. `qa.py`는 지정한 세션의 로그를 읽어 질문에 답합니다. 내부 작업 흐름은 각 폴더의 README에 있습니다.
+
+### 세션 조회와 보고서
+
+```mermaid
+flowchart LR
+    S["Investigator·Detective 세션"] --> LOAD["report_generator.py<br/>정보·작업 결과 로드"]
+    LOAD --> SUM["Codex<br/>보고서 내용 정리"]
+    SUM --> VAL["shared/validation.py<br/>저장된 후보와 대조"]
+    VAL --> HTML["HTML 보고서"]
+    S --> CONTEXT["qa.py<br/>요약·작업 로그 읽기"]
+    Q["사용자 질문"] --> ANSWER["Codex<br/>질문에 답변"]
+    CONTEXT --> ANSWER
+```
+
+보고서 검증은 세션에 저장된 근거와 후보를 대조합니다. `qa.py`는 현재 작업 로그에서 요약, 일반 발견사항과 일부 분석 내용을 읽으므로 세션 전체를 빠짐없이 검색하는 도구는 아닙니다.
+
 ## 준비
 
 - Python 3.10 이상

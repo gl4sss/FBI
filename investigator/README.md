@@ -2,6 +2,28 @@
 
 펌웨어의 형식과 문자열을 수집한 뒤 `binwalk --extract`로 세션 디렉터리에 추출합니다. 스크립트, 소스 파일, 실행 파일을 코드 검토 작업에 배정하고, 서비스·설정·구성요소를 조사합니다. 발견된 의심 위치마다 진입점, 데이터 흐름, 방어 조건, 반대 근거, 영향과 남은 의문을 확인하는 별도 작업을 실행합니다. 오케스트레이터는 이 기록을 검토한 뒤 추가 작업을 결정합니다. 이전 버전과 패치 버전도 선택적으로 비교할 수 있습니다.
 
+## 내부 흐름
+
+```mermaid
+flowchart TD
+    FW["펌웨어 파일"] --> MAIN["main.py<br/>실행·시간 예산·세션 관리"]
+    MAIN --> INFO["firmware_utils.py<br/>형식·해시·문자열 수집"]
+    INFO --> EXT["extractor.py<br/>binwalk 추출·결과 검증"]
+    FW --> DIFF["patch_differ.py<br/>차이와 조사 힌트"]
+    PATCH["패치 버전 선택 입력"] --> DIFF
+    EXT -->|"추출 성공"| SCAN["scan_scope.py<br/>코드 파일 목록·검토 작업"]
+    SCAN --> REVIEW["worker.py<br/>파일별 정적 검토"]
+    REVIEW --> BASE["deep_research.py<br/>시스템·구성요소 조사"]
+    BASE --> FIND["deep_research.py<br/>의심 위치별 후속 조사"]
+    FIND --> ORCH["orchestrator.py<br/>근거 공백과 다음 작업 결정"]
+    ORCH -->|"추가 작업"| WORK["worker.py<br/>추가 조사"]
+    WORK --> ORCH
+    DIFF --> ORCH
+    MAIN --> OUT["세션 기록·조사 상태·HTML 보고서"]
+```
+
+`main.py`가 추출 성공을 확인한 뒤 코드 검토, 기본 조사, 위치별 후속 조사를 순서대로 실행합니다. 그 결과를 보고 오케스트레이터가 추가 작업을 반복합니다. 패치 비교는 `--patched`를 준 경우에만 수행하며 조사 힌트로 사용합니다. 추출 실패 시에는 분석 작업을 시작하지 않습니다.
+
 ```bash
 python3 investigator/main.py path/to/firmware.bin
 python3 investigator/main.py path/to/old.bin --patched path/to/new.bin
