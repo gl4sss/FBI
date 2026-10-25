@@ -19,6 +19,8 @@ Return ONLY a valid JSON object — no markdown, no text outside JSON:
 
   "test_results": {
     "executed": true,
+    "command": "exact command or local action used, or null",
+    "artifact": "path to captured output when no command is available, or null",
     "exit_code": 0,
     "stdout": "...",
     "stderr": "...",
@@ -118,7 +120,7 @@ class PocWorker:
         qemu_block = ""
         if qemu_info and qemu_info.get("started"):
             qemu_block = (
-                f"\nQEMU ENVIRONMENT (running — use these to test):\n"
+                f"\nQEMU PROCESS (started; boot and service availability are unverified):\n"
                 f"{qemu_info.get('connection_info', '')}\n"
                 f"Architecture: {qemu_info.get('arch')}\n"
                 f"Machine: {qemu_info.get('machine')}\n"
@@ -127,6 +129,11 @@ class PocWorker:
             qemu_block = (
                 f"\nQEMU STATUS: Not running — {qemu_info.get('reason', 'failed to start')}\n"
                 f"Perform static/offline analysis. Still write trigger_guide with QEMU setup instructions.\n"
+            )
+        if qemu_info and qemu_info.get("lab"):
+            qemu_block += (
+                "\nLAB RESULT (check verification before using):\n"
+                + json.dumps(qemu_info["lab"], ensure_ascii=False)[:4000] + "\n"
             )
 
         full_prompt = (
@@ -140,7 +147,8 @@ class PocWorker:
             f"VULNERABILITY REFERENCE: {task.get('vulnerability_ref', 'N/A')}\n\n"
             f"TASK:\n<task>\n{task['prompt']}\n</task>\n\n"
             f"RESULT RULES:\n"
-            f"- Set test_results.executed=true only after a real run; include observed output and an artifact or command reference.\n"
+            f"- Set test_results.executed=true only after a real run; include the exact command "
+            f"or captured artifact, observed output or exit code, and concrete trigger evidence.\n"
             f"- If no run is possible, set trigger_confirmed=null, evidence_strength=None, and test_results=null. "
             f"Return partial with the blocker and a focused follow-up. Never invent output.\n"
             f"- Use CVSS values only for conditions supported by evidence; otherwise use null.\n"

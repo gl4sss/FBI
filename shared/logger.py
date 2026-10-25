@@ -6,7 +6,7 @@ from pathlib import Path
 class ConversationLogger:
     def __init__(self, sessions_dir: str, firmware_name: str,
                  resume_from: str | None = None):
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         self.session_path = (Path(resume_from) if resume_from else
                              Path(sessions_dir) / firmware_name / timestamp)
         self.session_path.mkdir(parents=True, exist_ok=True)

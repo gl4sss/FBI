@@ -494,7 +494,9 @@ def run_assistant(detective_session_dir: str, settings: dict,
             kc_file = r.get("kill_chain_file")
             if kc_file:
                 kill_chain_info["kill_chain_file"] = kc_file
-            if (r.get("test_result") or {}).get("full_chain_success"):
+            test = r.get("test_result") or {}
+            if (test.get("full_chain_success") is True and test.get("executed") is True
+                    and (test.get("evidence") or test.get("evidence_files"))):
                 kill_chain_info["chain_working"] = True
 
 
@@ -544,6 +546,9 @@ def run_assistant(detective_session_dir: str, settings: dict,
         print(f"    Q&A 모드를 사용하세요: python qa.py --session {session_path}")
 
     print()
+    return {"session_path": str(session_path), "report": str(report_path),
+            "kill_chain_file": kill_chain_info.get("kill_chain_file"),
+            "chain_working": kill_chain_info.get("chain_working", False)}
 
 
 def main():

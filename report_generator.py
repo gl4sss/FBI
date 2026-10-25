@@ -16,7 +16,8 @@ from pathlib import Path
 
 from shared.codex_client import run_codex
 from shared.resume import load_completed_tasks
-from shared.validation import collect_report_candidates, validate_report
+from shared.validation import (_executed_test_evidence, collect_report_candidates,
+                               validate_report)
 from shared.prompting import analysis_input
 
 
@@ -75,6 +76,8 @@ def _load_session(session_dir: str) -> dict:
         "scan_coverage": {},
         "research_status": {},
         "goal_audit": "",
+        "pipeline_status": {},
+        "inventory_issues": [],
     }
 
     fi_path = sp / "firmware_info.json"
@@ -111,6 +114,7 @@ def _load_session(session_dir: str) -> dict:
             "findings": c.get("findings", []),
             "suspected_findings": c.get("suspected_findings", []),
             "reviewed_files": c.get("reviewed_files", []),
+            "components": c.get("components", []),
             "evidence": c.get("evidence", []),
             "inferences": c.get("inferences", []),
             "analysis": (c.get("analysis") or "")[:5000],
@@ -128,11 +132,17 @@ def _load_session(session_dir: str) -> dict:
     scope_path = sp / "scan_scope.json"
     if scope_path.exists():
         scope = json.loads(scope_path.read_text(encoding="utf-8"))
+        data["inventory_issues"] = [item for item in scope.get("inventory") or []
+                                    if item.get("status") in {"unreadable", "skipped"}]
         targets = set(scope.get("targets") or [])
         reviewed = {path for task in data["completed_tasks"]
+                    if task.get("status") != "failed"
                     for path in task.get("reviewed_files") or []}
         missing = sorted(targets - reviewed)
         data["scan_coverage"] = {
+            "scope_label": "추출 파일" if any(
+                task.get("type") == "file_analysis" for task in scope.get("tasks") or []
+            ) else "코드 파일",
             "target_count": len(targets),
             "reviewed_count": len(targets & reviewed),
             "unreviewed_count": len(missing),
@@ -144,6 +154,9 @@ def _load_session(session_dir: str) -> dict:
     goal_audit_path = sp / "research_artifacts" / "audit.md"
     if goal_audit_path.exists():
         data["goal_audit"] = goal_audit_path.read_text(encoding="utf-8")[:20000]
+    pipeline_path = sp / "coordinator_status.json"
+    if pipeline_path.exists():
+        data["pipeline_status"] = json.loads(pipeline_path.read_text(encoding="utf-8"))
 
     return data
 
@@ -198,8 +211,7 @@ def _build_analysis_prompt(data: dict) -> str:
                 lines.append(f"  심층조사: {json.dumps(investigation, ensure_ascii=False)}")
             assessment = task.get("vdp_assessment") or {}
             test = task.get("test_results") or {}
-            if (assessment.get("trigger_confirmed") is True and
-                    test.get("executed") is True and test.get("evidence")):
+            if assessment.get("trigger_confirmed") is True and _executed_test_evidence(test):
                 lines.append(f"  - 취약점 확인됨 (PoC {'있음' if task.get('poc_code') else '없음'})")
                 lines.append(f"  재현 근거: {test['evidence']}")
                 if task.get("impact"):
@@ -216,9 +228,22 @@ def _build_analysis_prompt(data: dict) -> str:
             )
     coverage = data.get("scan_coverage") or {}
     if coverage:
-        lines.append(f"\n=== 코드 검토 범위 ===\n"
+        lines.append(f"\n=== {coverage.get('scope_label', '코드 파일')} 검토 범위 ===\n"
                      f"대상 {coverage['target_count']}개, 검토 기록 {coverage['reviewed_count']}개, "
                      f"미검토 {coverage['unreviewed_count']}개")
+    components = [component for task in data["completed_tasks"]
+                  for component in task.get("components") or []]
+    if components:
+        lines.append("\n=== 외부 구성요소 확인 기록 ===")
+        for component in components[:100]:
+            lines.append(
+                f"{component.get('product', '?')} {component.get('version', 'unknown')}: "
+                f"advisories_checked={component.get('advisories_checked', False)}, "
+                f"CVE={','.join(component.get('cve_ids') or []) or 'none'}, "
+                f"applicability={component.get('applicability', 'unknown')}; "
+                f"version_evidence={'; '.join(component.get('version_evidence') or [])}; "
+                f"sources={'; '.join(component.get('advisory_sources') or [])}"
+            )
     status = data.get("research_status") or {}
     if status:
         lines.append(f"\n=== 리서치 진행 상태 ===\n"
@@ -373,7 +398,7 @@ def _render_html(data: dict, report: dict) -> str:
     task_count = len(data.get("completed_tasks", []))
     coverage = data.get("scan_coverage") or {}
     coverage_text = (
-        f"탐지된 코드 파일 {coverage['target_count']}개 중 "
+        f"탐지된 {coverage.get('scope_label', '코드 파일')} {coverage['target_count']}개 중 "
         f"{coverage['reviewed_count']}개에 검토 기록이 있고 "
         f"{coverage['unreviewed_count']}개는 미검토입니다. "
         if coverage else "코드 파일 검토 범위 기록이 없습니다. "
@@ -395,6 +420,81 @@ def _render_html(data: dict, report: dict) -> str:
         f'<div class="section-box"><h3>대화형 Goal 추가 조사 기록</h3>'
         f'<div style="white-space:pre-wrap">{_esc(data.get("goal_audit"))}</div></div>'
         if data.get("goal_audit") else ""
+    )
+    pipeline = data.get("pipeline_status") or {}
+    inventory_issues = data.get("inventory_issues") or []
+    inventory_text = (
+        f" 목록에서 읽지 못하거나 건너뛴 항목 {len(inventory_issues)}개는 "
+        "검토 범위에서 제외했으며 scan_scope.json에 이유를 기록했습니다."
+        if inventory_issues else ""
+    )
+    stage_rows = "".join(
+        "<tr>" + f"<td>{_esc(kind)}</td>" + "".join(
+            f"<td>{int(counts.get(status, 0))}</td>"
+            for status in ("pending", "running", "complete", "failed")
+        ) + "</tr>"
+        for kind, counts in sorted((pipeline.get("stages") or {}).items())
+    )
+    job_rows = "".join(
+        "<tr>" + "".join(f"<td>{_esc(value)}</td>" for value in (
+            job.get("kind", ""),
+            (job.get("payload") or {}).get("stable_id", job.get("key", ""))[:16],
+            job.get("status", ""),
+            (job.get("result") or {}).get("error") or
+            (job.get("result") or {}).get("session_path", ""),
+        )) + "</tr>"
+        for job in pipeline.get("jobs") or []
+    )
+    pipeline_html = (
+        '<div class="section-box"><h3>연계 작업 상태</h3>'
+        + f'<p>첫 Detective 시작: {_esc(pipeline.get("first_detective_start_seconds", "미시작"))}초, '
+          f'연계 작업 완료: {_esc(pipeline.get("elapsed_seconds", "진행 중"))}초</p>'
+        '<table><thead><tr><th>단계</th><th>대기</th><th>진행</th>'
+        '<th>완료</th><th>실패</th></tr></thead><tbody>'
+        + stage_rows + '</tbody></table>'
+        + ('<details><summary>작업별 상태</summary><table><thead><tr>'
+           '<th>단계</th><th>작업 ID</th><th>상태</th><th>결과 또는 오류</th>'
+           '</tr></thead><tbody>' + job_rows + '</tbody></table></details>'
+           if job_rows else '')
+        + '</div>'
+        if stage_rows else ""
+    )
+    confirmed_rows = "".join(
+        "<tr>" + "".join(f"<td>{_esc(value)}</td>" for value in (
+            (job.get("payload") or {}).get("stable_id", job.get("key", ""))[:16],
+            claim.get("title", claim.get("vuln_id", "")),
+            "; ".join(claim.get("evidence") or []),
+            (job.get("result") or {}).get("session_path", ""),
+        )) + "</tr>"
+        for job in pipeline.get("jobs") or []
+        if job.get("kind") == "detective" and job.get("status") == "complete"
+        for claim in (job.get("result") or {}).get("confirmed_vulns") or []
+    )
+    confirmed_html = (
+        '<h3>Detective 재현 확인 결과</h3><table><thead><tr>'
+        '<th>의심 위치 ID</th><th>확인 항목</th><th>실행 증거</th><th>Detective 세션</th>'
+        '</tr></thead><tbody>' + confirmed_rows + '</tbody></table>'
+        if confirmed_rows else ""
+    )
+    component_rows = "".join(
+        "<tr>" + "".join(f"<td>{_esc(value)}</td>" for value in (
+            component.get("product", ""), component.get("version", "unknown"),
+            ", ".join(component.get("cve_ids") or []),
+            "조회함" if component.get("advisories_checked") else "미조회",
+            component.get("applicability", "unknown"),
+            "; ".join(component.get("version_evidence") or []),
+            "; ".join(component.get("configuration_evidence") or []),
+            "; ".join(component.get("advisory_sources") or []),
+        )) + "</tr>"
+        for task in data.get("completed_tasks", [])
+        for component in task.get("components") or []
+    )
+    components_html = (
+        '<h3>외부 구성요소 확인 기록</h3><table><thead><tr><th>제품</th><th>버전</th>'
+        '<th>CVE</th><th>자료 조회</th><th>적용 평가</th><th>버전 근거</th>'
+        '<th>설정 근거</th><th>공식 자료</th>'
+        '</tr></thead><tbody>' + component_rows + '</tbody></table>'
+        if component_rows else ""
     )
 
     size_bytes = fi.get("size_bytes", 0)
@@ -498,8 +598,9 @@ def _render_html(data: dict, report: dict) -> str:
 
   <!-- 3. 분석 범위 및 검증 기준 -->
   <h2>3. 분석 범위 및 검증 기준</h2>
-  <div class="section-box">저장 세션 <code>{_esc(session_name)}</code>의 작업 결과 {task_count}건을 바탕으로 작성했습니다. {coverage_text}{research_time_text}의심 위치 {report.get('candidate_count', 0)}건을 개별 항목으로 기록했습니다. 관찰 근거가 없는 항목은 미검증으로 표시합니다. '재현 확인'은 실제 실행, 트리거 확인, 실행 증거가 모두 기록된 경우입니다. '이번 테스트 미재현'과 '재현 미실시'는 취약점이 없다는 뜻이 아닙니다.</div>
+  <div class="section-box">저장 세션 <code>{_esc(session_name)}</code>의 작업 결과 {task_count}건을 바탕으로 작성했습니다. {coverage_text}{inventory_text}{research_time_text}의심 위치 {report.get('candidate_count', 0)}건을 개별 항목으로 기록했습니다. 관찰 근거가 없는 항목은 미검증으로 표시합니다. '재현 확인'은 실행한 명령 또는 산출물, 관찰 결과, 트리거 근거가 기록된 경우입니다. '이번 테스트 미재현'과 '재현 미실시'는 취약점이 없다는 뜻이 아닙니다.</div>
   {goal_audit_html}
+  {pipeline_html}
 
   <!-- 4. 발견사항 요약 -->
   <h2>4. 발견사항 요약</h2>
@@ -517,14 +618,14 @@ def _render_html(data: dict, report: dict) -> str:
   {vuln_cards if vuln_cards else '<p style="color:var(--muted)">상세 분석 자료 없음</p>'}
 
   <!-- 6. 공격 표면 분석 -->
-  <h2>6. 공격 표면 분석</h2><div class="section-box">{attack_surface or '확인된 자료 없음'}</div>
+  <h2>6. 공격 표면 분석</h2><div class="section-box">{attack_surface or '확인된 자료 없음'}{components_html}</div>
 
   <!-- 7. 암호화 평가 -->
   <h2>7. 암호화 구현 평가</h2><div class="section-box">{crypto_assessment or '확인된 자료 없음'}</div>
 
   <!-- 8. PoC 가능성 및 한계 -->
   <h2>8. PoC 가능성 및 한계</h2>
-  <div class="section-box">{poc_potential or 'PoC 가능성 평가 자료 없음'}<h3>검증 한계</h3>{'<ul class="key-findings">' + limitation_items + '</ul>' if limitation_items else '기록된 제한 사항 없음'}</div>
+  <div class="section-box">{poc_potential or 'PoC 가능성 평가 자료 없음'}{confirmed_html}<h3>검증 한계</h3>{'<ul class="key-findings">' + limitation_items + '</ul>' if limitation_items else '기록된 제한 사항 없음'}</div>
 
   <!-- 9. 결론 및 권고사항 -->
   <h2>9. 결론 및 권고사항</h2>
@@ -567,7 +668,8 @@ def generate_report(session_dir: str, output_dir: str = "./report",
     coverage = data.get("scan_coverage") or {}
     if coverage.get("unreviewed_count"):
         report["limitations"].append(
-            f"탐지된 코드 파일 {coverage['unreviewed_count']}개를 검토하지 못했습니다."
+            f"탐지된 {coverage.get('scope_label', '코드 파일')} "
+            f"{coverage['unreviewed_count']}개를 검토하지 못했습니다."
         )
     research_status = data.get("research_status") or {}
     if research_status.get("stop_reason") == "time_budget_reached":

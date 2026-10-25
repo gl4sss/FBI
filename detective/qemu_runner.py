@@ -49,8 +49,11 @@ def detect_arch(firmware_info: dict) -> str:
     return "unknown"
 
 
-def _free_port(start: int) -> int:
+def _free_port(start: int, reserved: set[int] | None = None) -> int:
+    reserved = reserved or set()
     for port in range(start, start + 100):
+        if port in reserved:
+            continue
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.bind(("127.0.0.1", port))
@@ -98,7 +101,12 @@ class QemuRunner:
             }
 
         self.telnet_port = _free_port(self.cfg.get("telnet_port", 4444))
-        self.monitor_port = _free_port(self.cfg.get("monitor_port", 4445))
+        self.monitor_port = _free_port(self.cfg.get("monitor_port", 4445),
+                                       {self.telnet_port})
+        http_port = _free_port(self.cfg.get("http_port", 8080),
+                               {self.telnet_port, self.monitor_port})
+        https_port = _free_port(self.cfg.get("https_port", 8443),
+                                {self.telnet_port, self.monitor_port, http_port})
 
         Path(work_dir).mkdir(parents=True, exist_ok=True)
         self.log_path = str(Path(work_dir) / "qemu.log")
@@ -112,7 +120,8 @@ class QemuRunner:
             "-serial", f"telnet:127.0.0.1:{self.telnet_port},server,nowait",
             "-monitor", f"telnet:127.0.0.1:{self.monitor_port},server,nowait",
             "-net", "nic",
-            "-net", f"user,hostfwd=tcp::8080-:80,hostfwd=tcp::8443-:443",
+            "-net", (f"user,hostfwd=tcp::{http_port}-:80,"
+                     f"hostfwd=tcp::{https_port}-:443"),
         ]
 
         log_f = open(self.log_path, "w")
@@ -143,14 +152,14 @@ class QemuRunner:
             "pid": self._proc.pid,
             "telnet_port": self.telnet_port,
             "monitor_port": self.monitor_port,
-            "http_port": 8080,
-            "https_port": 8443,
+            "http_port": http_port,
+            "https_port": https_port,
             "log_path": self.log_path,
             "connection_info": (
                 f"Serial console: telnet 127.0.0.1 {self.telnet_port}\n"
                 f"QEMU monitor:   telnet 127.0.0.1 {self.monitor_port}\n"
-                f"HTTP (if any):  http://127.0.0.1:8080\n"
-                f"HTTPS (if any): https://127.0.0.1:8443"
+                f"HTTP (if any):  http://127.0.0.1:{http_port}\n"
+                f"HTTPS (if any): https://127.0.0.1:{https_port}"
             ),
         }
 

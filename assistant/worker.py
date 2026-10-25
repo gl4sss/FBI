@@ -26,6 +26,7 @@ Return ONLY a valid JSON object — no markdown, no text outside JSON:
 
   "test_result": {
     "executed": true,
+    "command": "exact local test command, or null if not executed",
     "exit_code": 0,
     "stdout": "...",
     "stderr": "...",
@@ -69,6 +70,8 @@ Return ONLY a valid JSON object — no markdown, no text outside JSON:
 
   "test_result": {
     "executed": true,
+    "command": "exact local full-chain test command, or null if not executed",
+    "exit_code": 0,
     "full_chain_success": false,
     "stages_passed": [],
     "stages_failed": [],
@@ -152,7 +155,7 @@ class ExploitWorker:
             f"for chain_integration, use {self.exploit_output_dir}/kill_chain.py.\n"
             f"- Test only against the configured local lab or an explicitly supplied test target. "
             f"If unavailable, set executed=false and report the artifact as untested.\n"
-            f"- Set stage_success or full_chain_success true only after an executed test with recorded evidence.\n"
+            f"- Set stage_success or full_chain_success true only after an executed test with the exact command, observed output or exit code, and recorded evidence.\n"
             f"- Put observations in evidence and unverified implications in inferences. "
             f"If a prerequisite fails, return partial with a focused follow-up.\n\n"
             f"OUTPUT FORMAT (return ONLY this JSON):\n{schema}"

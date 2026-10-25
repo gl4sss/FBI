@@ -5,6 +5,25 @@ TASK_STATUSES = {"completed", "partial", "failed"}
 ROADMAP_STATUSES = {"in_progress", "complete", "blocked"}
 
 
+def _executed_test_evidence(test: dict) -> bool:
+    """Require a reproducible action and an observed result in a worker record."""
+    if test.get("executed") is not True or not test.get("evidence"):
+        return False
+    action = test.get("command") or test.get("artifact")
+    observed = (isinstance(test.get("exit_code"), int) or
+                bool(test.get("stdout") or test.get("stderr") or test.get("artifact")))
+    return bool(action and observed)
+
+
+def _executed_chain_evidence(test: dict) -> bool:
+    """A chain test needs a recorded command and an observed execution result."""
+    return bool(test.get("executed") is True and
+                (test.get("command") or test.get("test_command")) and
+                (test.get("evidence") or test.get("evidence_files")) and
+                (isinstance(test.get("exit_code"), int) or
+                 test.get("stdout") or test.get("stderr")))
+
+
 def validate_roadmap(roadmap: dict, completed_tasks: list[dict],
                      *, allow_blocked: bool = False) -> dict:
     if not isinstance(roadmap, dict):
@@ -53,7 +72,7 @@ def validate_worker_result(result: dict, task_id: str,
         if not isinstance(item, dict):
             raise ValueError(f"Task {task_id} has an invalid suspected finding")
         item["finding_id"] = f"{task_id}-{index:03d}"
-        for field in ("location", "title", "category", "observation", "inference",
+        for field in ("location", "file_path", "line_or_offset", "title", "category", "observation", "inference",
                       "recommendation"):
             if not isinstance(item.get(field, ""), str):
                 raise ValueError(f"Task {task_id} has invalid {field} in suspected finding")
@@ -64,9 +83,34 @@ def validate_worker_result(result: dict, task_id: str,
         for value in item_evidence:
             if value and value not in result["evidence"]:
                 result["evidence"].append(value)
+        for field in ("entry_conditions", "counterevidence", "unknowns"):
+            values = item.setdefault(field, [])
+            if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+                raise ValueError(f"Task {task_id} has invalid {field} in suspected finding")
     reviewed = result.setdefault("reviewed_files", [])
     if not isinstance(reviewed, list) or any(not isinstance(path, str) for path in reviewed):
         raise ValueError(f"Task {task_id} needs a reviewed_files list")
+    components = result.setdefault("components", [])
+    if not isinstance(components, list):
+        raise ValueError(f"Task {task_id} needs a components list")
+    for component in components:
+        if not isinstance(component, dict) or not isinstance(component.get("product"), str):
+            raise ValueError(f"Task {task_id} has an invalid component")
+        for field in ("version_evidence", "configuration_evidence", "advisory_sources", "cve_ids"):
+            values = component.setdefault(field, [])
+            if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+                raise ValueError(f"Task {task_id} has invalid component {field}")
+        if not isinstance(component.get("version", ""), str):
+            raise ValueError(f"Task {task_id} has invalid component version")
+        if component.get("advisories_checked") is True and not component["advisory_sources"]:
+            component["advisories_checked"] = False
+        if not component.get("advisories_checked"):
+            component["cve_ids"] = []
+        if component.get("applicability") not in {"confirmed", "possible", "not_applicable", "unknown", None}:
+            raise ValueError(f"Task {task_id} has invalid component applicability")
+        if (component.get("applicability") == "confirmed" and
+                (not component["version_evidence"] or not component["advisory_sources"])):
+            component["applicability"] = "unknown"
     if not isinstance(result.get("analysis", ""), str):
         raise ValueError(f"Task {task_id} needs analysis text")
     for field in ("test_results", "test_result", "vdp_assessment",
@@ -109,15 +153,43 @@ def validate_worker_result(result: dict, task_id: str,
     assessment = result.get("vdp_assessment")
     if isinstance(assessment, dict) and assessment.get("trigger_confirmed") is True:
         test = result.get("test_results") or {}
-        if test.get("executed") is not True or not test.get("evidence"):
+        if not _executed_test_evidence(test):
             assessment.update(trigger_confirmed=None, evidence_strength="None",
                               cve_worthy=False, vdp_suitable=False)
             if result["status"] == "completed":
                 result["status"] = "partial"
             result["follow_up_needed"] = True
-            result["follow_up_reason"] = "Trigger claim lacks an executed test and observed evidence"
+            result["follow_up_reason"] = "Trigger claim lacks an executed action and observed evidence"
+
+    chain_test = result.get("test_result") or {}
+    if chain_test.get("stage_success") or chain_test.get("full_chain_success"):
+        if not _executed_chain_evidence(chain_test):
+            chain_test["stage_success"] = False
+            chain_test["full_chain_success"] = False
+            if result["status"] == "completed":
+                result["status"] = "partial"
+            result["follow_up_needed"] = True
+            result["follow_up_reason"] = "Chain success lacks an executed test and observed evidence"
 
     return result
+
+
+def validate_confirmed_chain(roadmap: dict, completed_tasks: list[dict]) -> dict:
+    claim = roadmap.get("confirmed_chain") or {}
+    if not isinstance(claim, dict):
+        raise ValueError("confirmed_chain must be an object")
+    tests = [(task.get("result") or {}).get("test_result") or {}
+             for task in completed_tasks]
+    executed = [test for test in tests if _executed_chain_evidence(test)]
+    success = any(test.get("full_chain_success") is True for test in executed)
+    if claim.get("chain_tested") and not executed:
+        claim["chain_tested"] = False
+    if claim.get("chain_working") and not success:
+        claim["chain_working"] = False
+        roadmap.setdefault("validation_warnings", []).append(
+            "Full chain success lacks an executed test with evidence")
+    roadmap["confirmed_chain"] = claim
+    return roadmap
 
 
 def validate_confirmed_vulns(roadmap: dict, completed_tasks: list[dict]) -> dict:
@@ -129,8 +201,7 @@ def validate_confirmed_vulns(roadmap: dict, completed_tasks: list[dict]) -> dict
         result = task.get("result") or {}
         assessment = result.get("vdp_assessment") or {}
         test = result.get("test_results") or {}
-        if (assessment.get("trigger_confirmed") is True and
-                test.get("executed") is True and test.get("evidence")):
+        if assessment.get("trigger_confirmed") is True and _executed_test_evidence(test):
             tested[task.get("task_id")] = result
 
     confirmed = []
@@ -210,8 +281,7 @@ def _report_verification(source: dict, evidence: list[str]) -> str:
     test = source.get("test_results")
     assessment = assessment if isinstance(assessment, dict) else {}
     test = test if isinstance(test, dict) else {}
-    if (test.get("executed") is True and test.get("evidence") and
-            assessment.get("trigger_confirmed") is True):
+    if _executed_test_evidence(test) and assessment.get("trigger_confirmed") is True:
         return "재현 확인"
     if test.get("executed") is True:
         return "이번 테스트 미재현"

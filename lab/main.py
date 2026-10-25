@@ -158,7 +158,8 @@ def _dispatch_tasks(new_tasks, worker, session_mgr, firmware_path,
 
 
 def run_lab(firmware_path: str, settings: dict,
-            resume_from: str | None = None, env_only: bool = False):
+            resume_from: str | None = None, env_only: bool = False,
+            *, return_details: bool = False):
     cfg_analysis = settings["analysis"]
     cfg_orch = settings["orchestrator"]
     cfg_worker = settings["worker"]
@@ -237,6 +238,7 @@ def run_lab(firmware_path: str, settings: dict,
             env_mgr.apply_task_result(task["task_id"], task["result"])
 
     # -- 메인 루프 ------------------------------------------------------------
+    last_status = "not_started"
     while iteration < max_iterations:
         iteration += 1
 
@@ -251,6 +253,7 @@ def run_lab(firmware_path: str, settings: dict,
                 roadmap = orchestrator.decide(firmware_info, completed_tasks)
             except Exception as exc:
                 print(f"[!] Orchestrator error: {exc}")
+                last_status = "failed"
                 break
             logger.save_roadmap(roadmap)
 
@@ -258,6 +261,7 @@ def run_lab(firmware_path: str, settings: dict,
 
         summary = roadmap.get("analysis_summary", "")
         status = roadmap.get("status", "unknown")
+        last_status = status
         phase = roadmap.get("current_phase", "?")
         env_status = roadmap.get("environment_status", {})
 
@@ -376,6 +380,10 @@ def run_lab(firmware_path: str, settings: dict,
         print(f"\nLAB_ENV_JSON={env_json_path}")
 
     print()
+    if return_details:
+        return {"session_path": str(session_path), "environment": str(env_json_path),
+                "setup_script": str(script_path), "summary": final_summary,
+                "status": last_status}
     return str(env_json_path)
 
 

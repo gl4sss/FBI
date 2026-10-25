@@ -1,11 +1,12 @@
 # FBI (Firmware Binary Inspector)
 
-FBI는 Codex CLI로 펌웨어 바이너리를 분석하는 로컬 도구입니다. 펌웨어를 추출한 뒤 탐지된 코드 파일을 검토하고, 서비스·설정·구성요소와 의심 위치별 성립 조건을 추가 조사합니다. 오케스트레이터는 남은 근거 공백을 따라 후속 작업을 정합니다. 작업 결과는 세션에 저장되며, Detective 검증이나 한국어 HTML 보고서로 이어집니다.
+FBI는 Codex CLI로 펌웨어 바이너리를 분석하는 로컬 도구입니다. 통합 실행기는 펌웨어 추출 후 모든 일반 파일을 검토하고, 의심 위치가 기록되는 대로 Detective 검증을 시작합니다. 필요하면 Lab 환경 구성과 Assistant의 공격 체인 분석을 연결합니다. 각 단계의 결과는 세션과 한국어 HTML 보고서에 남습니다.
 
 ## 구성
 
 | 경로 | 역할 |
 | --- | --- |
+| [`coordinator/`](coordinator/README.md) | 전 파일 검토와 단계별 작업 큐·잠금·재개를 관리하는 통합 실행기 |
 | [`investigator/`](investigator/README.md) | 펌웨어 정보 수집, 패치 비교, 정적 분석 작업 분배 |
 | [`detective/`](detective/README.md) | 조사 결과 검증, 선택적 QEMU 실행, 재현 절차 작성 |
 | [`lab/`](lab/README.md) | 에뮬레이션 및 디버깅 환경 구성 |
@@ -20,10 +21,14 @@ FBI는 Codex CLI로 펌웨어 바이너리를 분석하는 로컬 도구입니�
 
 ```mermaid
 flowchart LR
-    FW["분석 대상 펌웨어"] --> INV["Investigator<br/>추출·정적 조사"]
-    FW --> LAB["Lab<br/>동적 분석 환경 구성"]
-    INV -->|"의심 위치와 조사 기록"| DET["Detective<br/>재현 가능성 검토"]
-    DET -->|"검증된 결과"| AST["Assistant<br/>공격 체인 분석"]
+    FW["분석 대상 펌웨어"] --> CO["Coordinator<br/>작업 큐·잠금·재개"]
+    CO --> INV["Investigator<br/>추출·파일별 조사"]
+    INV -->|"의심 위치 즉시 전달"| CO
+    CO --> DET["Detective<br/>발견사항별 검증"]
+    DET -->|"환경 필요"| CO
+    CO --> LAB["Lab<br/>동적 분석 환경 구성"]
+    DET -->|"검증된 결과"| CO
+    CO --> AST["Assistant<br/>공격 체인 분석"]
     INV --> IR["Investigator 세션"]
     DET --> DR["Detective 세션"]
     LAB --> LR["Lab 세션"]
@@ -38,7 +43,7 @@ flowchart LR
     SH -.-> AST
 ```
 
-Investigator가 분석의 시작점입니다. Detective와 Assistant는 각각 앞 단계의 세션을 명시적으로 입력받아 실행하며, Lab은 같은 펌웨어에 대해 별도로 실행합니다. Investigator와 Detective는 HTML 보고서를 자동 생성합니다. `qa.py`는 지정한 세션의 로그를 읽어 질문에 답합니다. 내부 작업 흐름은 각 폴더의 README에 있습니다.
+통합 명령에서는 Coordinator가 추출 후 모든 일반 파일을 한 개씩 검토하도록 Investigator를 실행합니다. 의심 위치는 저장 즉시 Detective 작업으로 전달됩니다. Detective가 환경 구성을 요청하면 Lab을 한 번 실행해 결과를 공유하고, 확인된 취약점이 생기면 Assistant를 실행합니다. 통합 실행은 모든 작업이 끝난 뒤 HTML 보고서를 한 번 생성합니다. 기존의 Investigator·Detective·Lab·Assistant 개별 명령도 사용할 수 있으며, Investigator와 Detective의 개별 명령은 각자 HTML 보고서를 생성합니다. `qa.py`는 지정한 세션의 로그를 읽어 질문에 답합니다. 내부 흐름은 각 폴더의 README에 있습니다.
 
 ### 세션 조회와 보고서
 
@@ -73,6 +78,13 @@ Investigator는 기본 정보 수집 후 세션의 `extracted/`에 펌웨어를 
 저장소 루트에서 실행합니다. 아래의 `path/to/firmware.bin`은 사용자가 별도로 준비한 분석 대상 파일입니다.
 
 ```bash
+# 통합 실행: 전 파일 검토와 발견사항별 후속 검증
+python3 coordinator/main.py path/to/firmware.bin
+
+# 동시 작업 수 조정, 외부 1차 자료 조회 허용
+python3 coordinator/main.py path/to/firmware.bin --investigator-workers 3 --detective-workers 2 --allow-network-research
+
+# 기존 개별 실행 명령
 python3 investigator/main.py path/to/firmware.bin
 
 # 약 45분의 리서치 시간 예산을 지정
@@ -90,6 +102,10 @@ python3 report_generator.py --session path/to/session
 ```
 
 `main.py`는 기존 명령 호환용 진입점이며 `investigator/main.py`로 연결됩니다. 각 명령의 옵션은 `--help`에서 확인할 수 있습니다.
+
+통합 실행 상태는 `sessions/coordinator/<펌웨어 SHA256>/pipeline_status.json`에 기록됩니다. 같은 펌웨어를 다시 실행하면 저장된 Investigator 세션과 미완료 작업을 복원합니다. `first_detective_start_seconds`는 통합 실행 시작부터 첫 Detective 작업까지, `elapsed_seconds`는 연계 작업 완료까지의 시간이며 최종 보고서 재생성 시간은 포함하지 않습니다. 두 값은 실제 펌웨어와 실행 환경에 따라 달라집니다.
+
+2026-10-25 로컬 모의 작업 측정(`python3 benchmark_coordinator.py`): 파일 발견 4건, 파일별 지연 0.04초, Detective 지연 0.08초, Detective 동시 실행 2개에서 첫 Detective 시작은 0.044~0.051초, 연계 작업 완료는 0.277~0.315초였습니다. 작업 지연만 순차 합산한 기준값은 0.48초입니다. 이 값은 스케줄링 검사용이며 실제 펌웨어·Codex·QEMU 처리 속도를 예측하지 않습니다.
 
 실행 중 생성되는 `sessions/`, `report/`, `poc_artifacts/`, `kill_chain_artifacts/` 등은 `.gitignore`에 등록되어 있습니다. 분석 대상 바이너리와 분석 결과를 공개하려면 권리 및 민감정보를 별도로 확인하세요.
 

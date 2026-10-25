@@ -5,7 +5,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from shared.codex_client import run_codex
-from shared.validation import validate_roadmap
+from shared.validation import validate_confirmed_chain, validate_roadmap
 from shared.prompting import analysis_input
 
 SYSTEM_PROMPT = """You assess whether confirmed firmware findings form a reproducible chain in the configured local analysis environment.
@@ -108,8 +108,9 @@ class AssistantOrchestrator:
             self.logger.log_orchestrator("user", payload, self._iteration)
 
         raw = self._call_codex(json.dumps(payload, ensure_ascii=False, indent=2))
-        response = validate_roadmap(self._parse_json(raw), completed_tasks,
-                                    allow_blocked=True)
+        response = validate_confirmed_chain(
+            validate_roadmap(self._parse_json(raw), completed_tasks,
+                             allow_blocked=True), completed_tasks)
 
         if self.logger:
             self.logger.log_orchestrator("assistant", response, self._iteration,

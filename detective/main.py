@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import sys
+from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +28,7 @@ from shared.mcp_manager import McpManager
 from shared.resume import load_completed_tasks
 from shared.session_manager import SessionManager
 from shared.validation import collect_report_candidates
+from coordinator.state import file_lock
 
 
 def load_settings(path: str) -> dict:
@@ -38,7 +40,8 @@ def _bar(title: str):
     print(f"\n{'='*64}\n  {title}\n{'='*64}")
 
 
-def load_investigator_session(session_dir: str) -> tuple[dict, list, str]:
+def load_investigator_session(session_dir: str,
+                              finding_ids: set[str] | None = None) -> tuple[dict, list, str]:
     sp = Path(session_dir)
 
     firmware_info = {}
@@ -59,6 +62,9 @@ def load_investigator_session(session_dir: str) -> tuple[dict, list, str]:
                 for item in [task["investigation"]]
                 if item.get("source_finding_id")}
     candidates = collect_report_candidates(saved_tasks)
+    if finding_ids is not None:
+        candidates = [candidate for candidate in candidates
+                      if candidate["finding_id"] in finding_ids]
     vulnerabilities = []
     for candidate in candidates:
         source = next(task for task in saved_tasks
@@ -79,6 +85,8 @@ def load_investigator_session(session_dir: str) -> tuple[dict, list, str]:
         })
     represented = {candidate["source_task"] for candidate in candidates}
     for task in saved_tasks:
+        if finding_ids is not None:
+            continue
         if task["task_id"] in represented:
             continue
         if task.get("findings") or task.get("follow_up_needed"):
@@ -323,8 +331,10 @@ def _dispatch_tasks(new_tasks, worker, session_mgr, firmware_path,
     return newly_completed
 
 
-def run_detective(investigator_session: str, settings: dict,
-                  firmware_path: str | None = None, no_qemu: bool = False):
+def _run_detective(investigator_session: str, settings: dict,
+                   firmware_path: str | None = None, no_qemu: bool = False,
+                   finding_ids: set[str] | None = None, lab_request=None,
+                   release_qemu_lock=None, handoff: dict | None = None):
     cfg_analysis = settings["analysis"]
     cfg_orch = settings["orchestrator"]
     cfg_worker = settings["worker"]
@@ -338,7 +348,10 @@ def run_detective(investigator_session: str, settings: dict,
     _bar("FBI Detective — CVE/VDP PoC 검증 및 트리거 가이드 생성")
     print(f"[*] Investigator 세션: {investigator_session}")
 
-    firmware_info, vulnerabilities, inv_summary = load_investigator_session(investigator_session)
+    firmware_info, vulnerabilities, inv_summary = load_investigator_session(
+        investigator_session, finding_ids=finding_ids)
+    if finding_ids is not None and not vulnerabilities:
+        raise ValueError(f"Investigator handoff finding not found: {sorted(finding_ids)}")
     research_status_path = Path(investigator_session) / "research_status.json"
     investigator_research_status = (
         json.loads(research_status_path.read_text(encoding="utf-8"))
@@ -347,7 +360,9 @@ def run_detective(investigator_session: str, settings: dict,
     goal_handoff_path = (Path(investigator_session) / "research_artifacts" /
                          "detective_handoff.md")
     goal_handoff = (goal_handoff_path.read_text(encoding="utf-8")[:20000]
-                    if goal_handoff_path.exists() else "")
+                    if finding_ids is None and goal_handoff_path.exists() else "")
+    if finding_ids is not None:
+        inv_summary = ""
 
     if not firmware_path:
         firmware_path = firmware_info.get("path", "")
@@ -384,6 +399,13 @@ def run_detective(investigator_session: str, settings: dict,
             print(f"[QEMU] 정적 분석 기반 PoC + 트리거 가이드 작성 모드로 진행")
     else:
         print(f"[QEMU] 건너뜀 — trigger_guide는 QEMU 설정 방법도 포함하여 작성됩니다.")
+
+    lab_info = {}
+    if lab_request and not no_qemu and not qemu_info.get("started"):
+        if release_qemu_lock:
+            release_qemu_lock()
+        lab_info = lab_request(firmware_path, firmware_info) or {}
+        qemu_info["lab"] = lab_info
 
     # MCP 설정
     cfg_mcp = settings.get("mcp", {})
@@ -430,12 +452,14 @@ def run_detective(investigator_session: str, settings: dict,
         "investigator_summary": inv_summary,
         "investigator_research_status": investigator_research_status,
         "goal_handoff": goal_handoff,
+        "finding_handoff": handoff or {},
         "vulnerabilities": vulnerabilities,
         "qemu": {
             "available": qemu_info.get("started", False),
             "arch": qemu_info.get("arch"),
             "connection_info": qemu_info.get("connection_info"),
         },
+        "lab": lab_info,
         "objective": (
             "Assess every Investigator candidate for CVE/VDP submission using its site, "
             "evidence, research assessment, and unknowns. Test triggers where the target "
@@ -465,6 +489,21 @@ def run_detective(investigator_session: str, settings: dict,
                 break
             logger.save_roadmap(roadmap)
             last_roadmap = roadmap
+
+            if roadmap.get("lab_required") is True and lab_request and not no_qemu and not lab_info:
+                if qemu_runner:
+                    qemu_runner.stop()
+                    qemu_runner = None
+                if release_qemu_lock:
+                    release_qemu_lock()
+                qemu_info = {"started": False, "reason": "Lab environment requested by Detective"}
+                lab_info = lab_request(firmware_path, firmware_info) or {}
+                qemu_info["lab"] = lab_info
+                completed_tasks.append({
+                    "task_id": f"lab_context_{iteration}", "type": "lab_environment",
+                    "result": {"status": "completed", "environment": lab_info,
+                               "reason": roadmap.get("lab_reason")},
+                })
 
             # 확인된 취약점 업데이트
             newly_confirmed = []
@@ -525,10 +564,17 @@ def run_detective(investigator_session: str, settings: dict,
 
             _bar(f"Codex PoC Workers  |  {cfg_worker['model']}  |  parallel={parallel_limit}")
 
-            newly = _dispatch_tasks(
-                new_tasks, worker, session_mgr, firmware_path,
-                qemu_info, logger, parallel_limit, session_path,
-            )
+            lab_summary = (lab_info.get("summary") or {}) if isinstance(lab_info, dict) else {}
+            shared_runtime = bool(lab_summary.get("ports") or
+                                  (lab_summary.get("verification") or {}).get("qemu_boots"))
+            runtime_lock = (file_lock(Path(cfg_analysis.get(
+                "qemu_lock_dir", Path(sessions_dir).parent / ".locks")),
+                "lab-runtime", blocking=True) if shared_runtime else nullcontext())
+            with runtime_lock:
+                newly = _dispatch_tasks(
+                    new_tasks, worker, session_mgr, firmware_path,
+                    qemu_info, logger, parallel_limit, session_path,
+                )
             completed_tasks.extend(newly)
 
     finally:
@@ -564,15 +610,15 @@ def run_detective(investigator_session: str, settings: dict,
             for g in guides:
                 print(f"  파일: {g}")
 
-    # HTML 보고서 생성
-    try:
-        from report_generator import generate_report
-        cfg_report = settings.get("report", {})
-        report_dir = cfg_report.get("output_dir", "./report")
-        report_path = generate_report(str(session_path), report_dir)
-        print(f"\n[Report] HTML report: {report_path}")
-    except Exception as exc:
-        print(f"[!] Report generation failed: {exc}")
+    if settings.get("report", {}).get("enabled", True):
+        try:
+            from report_generator import generate_report
+            cfg_report = settings.get("report", {})
+            report_dir = cfg_report.get("output_dir", "./report")
+            report_path = generate_report(str(session_path), report_dir)
+            print(f"\n[Report] HTML report: {report_path}")
+        except Exception as exc:
+            print(f"[!] Report generation failed: {exc}")
 
     # Codex 세션 재개 안내
     if detective.session_id:
@@ -598,6 +644,23 @@ def run_detective(investigator_session: str, settings: dict,
         print(f"    Q&A 모드를 사용하세요: python qa.py --session {session_path}")
 
     print()
+    return {"session_path": str(session_path), "confirmed_vulns": confirmed_vulns,
+            "lab": lab_info, "qemu": qemu_info}
+
+
+def run_detective(investigator_session: str, settings: dict,
+                  firmware_path: str | None = None, no_qemu: bool = False,
+                  finding_ids: set[str] | None = None, lab_request=None,
+                  handoff: dict | None = None):
+    """Run one Detective scope while reserving shared QEMU ports."""
+    lock_dir = Path(settings["analysis"].get(
+        "qemu_lock_dir", Path(settings["analysis"]["sessions_dir"]).parent / ".locks"))
+    if no_qemu:
+        return _run_detective(investigator_session, settings, firmware_path,
+                              no_qemu, finding_ids, lab_request, handoff=handoff)
+    with file_lock(lock_dir, "qemu-host-ports", blocking=True) as lease:
+        return _run_detective(investigator_session, settings, firmware_path,
+                              no_qemu, finding_ids, lab_request, lease.release, handoff)
 
 
 def main():

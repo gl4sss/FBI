@@ -19,15 +19,30 @@ Return ONLY a valid JSON object — no markdown, no text outside JSON:
   "suspected_findings": [
     {
       "location": "extracted/file/path:function, line or offset",
+      "file_path": "exact extracted file path",
+      "line_or_offset": "line number or binary offset",
       "title": "Short description of one distinct suspicious code site",
       "category": "suspected issue category",
       "observation": "What the code or tool output actually shows",
       "evidence": ["specific file:line, offset, or command output"],
       "inference": "Potential security consequence; state uncertainty",
+      "entry_conditions": ["conditions needed to reach this site"],
+      "counterevidence": ["observed guards or alternative explanation"],
+      "unknowns": ["conditions that still need verification"],
       "recommendation": "Focused verification or remediation"
     }
   ],
   "reviewed_files": ["exact path of each scoped file actually inspected"],
+  "components": [{
+    "product": "identified external component",
+    "version": "observed version or unknown",
+    "version_evidence": ["exact local file or command output"],
+    "configuration_evidence": ["applicability-relevant local settings"],
+    "advisories_checked": false,
+    "advisory_sources": ["primary vendor or CVE URL, only if actually checked"],
+    "cve_ids": ["CVE ID only when supported by a checked source"],
+    "applicability": "confirmed" | "possible" | "not_applicable" | "unknown"
+  }],
   "investigation": null | {
     "source_finding_id": "finding_id being investigated",
     "assessment": "supported" | "weakened" | "undetermined",
@@ -90,8 +105,15 @@ class Worker:
             f"Inspect every file listed in SCOPE FILES when present. Enumerate every distinct suspicious "
             f"code location you observe; do not stop at the first or only report the highest severity. "
             f"Create one suspected_findings item per location, including file and function/line/offset "
-            f"plus direct evidence. If a location is only a hypothesis, put it in inferences. "
+            f"plus direct evidence. Include exact file_path and line_or_offset when available. "
+            f"If a location is only a hypothesis, put it in inferences. "
             f"List files actually inspected in reviewed_files and explain any omissions.\n"
+            f"For external components, record product, version, build, and configuration "
+            f"evidence before considering a CVE. When network access is enabled, check "
+            f"primary vendor advisories and CVE records for identified external components; "
+            f"otherwise mark this check pending. Record each external component in components "
+            f"with local version/configuration evidence and primary source URLs. A name or "
+            f"version string alone does not prove applicability.\n"
             f"For a finding_investigation task, trace the reported site to an entry point "
             f"and sink where the artifacts permit it. Check guards, configuration, call "
             f"sites, counterevidence, and prerequisites. Populate investigation with "
@@ -104,6 +126,7 @@ class Worker:
             f"EXTRACTED DIRECTORY: {extracted_dir}\n\n"
             f"RESEARCH ARTIFACTS: {(self.logger.get_session_path() / 'research_artifacts').resolve() if self.logger else 'not available'}\n\n"
             f"SCOPE FILES: {json.dumps(task.get('scope_files', []), ensure_ascii=False)}\n\n"
+            f"SCOPE TYPES: {json.dumps(task.get('scope_types', {}), ensure_ascii=False)}\n\n"
             f"TASK ID: {task_id}\n"
             f"TASK TYPE: {task.get('type', 'analysis')}\n\n"
             f"TASK:\n<task>\n{task['prompt']}\n</task>\n\n"
@@ -134,6 +157,13 @@ class Worker:
 
         result = validate_worker_result(result, task_id,
                                         expected_finding_id=task.get("source_finding_id"))
+        if not self.network_access:
+            for component in result.get("components") or []:
+                component["advisories_checked"] = False
+                component["advisory_sources"] = []
+                component["cve_ids"] = []
+                if component.get("applicability") in {"confirmed", "possible"}:
+                    component["applicability"] = "unknown"
         result["session_id"] = actual_session_id
 
         final_session = actual_session_id or log_session
