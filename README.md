@@ -105,7 +105,7 @@ python3 report_generator.py --session path/to/session
 
 통합 실행 상태는 `sessions/coordinator/<펌웨어 SHA256>/pipeline_status.json`에 기록됩니다. 같은 펌웨어를 다시 실행하면 저장된 Investigator 세션과 미완료 작업을 복원합니다. `first_detective_start_seconds`는 통합 실행 시작부터 첫 Detective 작업까지, `elapsed_seconds`는 연계 작업 완료까지의 시간이며 최종 보고서 재생성 시간은 포함하지 않습니다. 두 값은 실제 펌웨어와 실행 환경에 따라 달라집니다.
 
-2026-10-25 로컬 모의 작업 측정(`python3 benchmark_coordinator.py`): 파일 발견 4건, 파일별 지연 0.04초, Detective 지연 0.08초, Detective 동시 실행 2개에서 첫 Detective 시작은 0.044~0.051초, 연계 작업 완료는 0.277~0.315초였습니다. 작업 지연만 순차 합산한 기준값은 0.48초입니다. 이 값은 스케줄링 검사용이며 실제 펌웨어·Codex·QEMU 처리 속도를 예측하지 않습니다.
+2026-10-25 로컬 모의 작업 측정(`python3 benchmark_coordinator.py`): 파일 발견 4건, 파일별 지연 0.04초, Detective 지연 0.08초, Detective 동시 실행 2개에서 첫 Detective 시작은 0.044초에서 0.051초, 연계 작업 완료는 0.277초에서 0.315초였습니다. 작업 지연만 순차 합산한 기준값은 0.48초입니다. 이 값은 스케줄링 검사용이며 실제 펌웨어·Codex·QEMU 처리 속도를 예측하지 않습니다.
 
 실행 중 생성되는 `sessions/`, `report/`, `poc_artifacts/`, `kill_chain_artifacts/` 등은 `.gitignore`에 등록되어 있습니다. 분석 대상 바이너리와 분석 결과를 공개하려면 권리 및 민감정보를 별도로 확인하세요.
 
