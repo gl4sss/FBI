@@ -15,6 +15,7 @@
   "analysis": {
     "max_iterations": 12,
     "extraction_timeout_sec": 300,
+    "max_specialist_tasks_per_run": 60,
     "scan_files_per_task": 4,
     "deep_research_enabled": true,
     "research_minutes": 0,

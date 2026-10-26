@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FBI Worker Dashboard</title>
+  <link rel="stylesheet" href="/dashboard.css">
+  <script src="/dashboard.js" defer></script>
+</head>
+<body>
+  <main class="shell">
+    <header class="masthead">
+      <div>
+        <p class="eyebrow">FBI 2.0 · Firmware Binary Inspector</p>
+        <h1>Worker Dashboard</h1>
+        <p class="subtitle">Investigator, Detective, Lab, Assistant 작업 상태</p>
+      </div>
+      <div class="live-status" id="connection" role="status" aria-live="polite">
+        <span class="live-dot"></span><span id="connection-label">연결 중</span>
+      </div>
+    </header>
+
+    <section class="overview" aria-label="실행 요약">
+      <div class="overview-item"><span>펌웨어</span><strong id="firmware-id">대기 중</strong></div>
+      <div class="overview-item"><span>분석 상태</span><strong id="investigator-status">대기 중</strong></div>
+      <div class="overview-item"><span>목록화한 항목</span><strong id="file-count">0</strong></div>
+      <div class="overview-item"><span>실행 중인 전담 작업</span><strong id="running-count">0</strong></div>
+      <div class="overview-item"><span>Detective 작업</span><strong id="detective-count">0</strong></div>
+      <div class="overview-item"><span>최근 갱신</span><strong id="updated-at">—</strong></div>
+    </section>
+
+    <section class="workspace" aria-label="작업 흐름">
+      <div class="graph-head">
+        <div>
+          <h2>실시간 작업 흐름</h2>
+          <p>선은 전담 분야에서 생성된 Detective 작업을 나타냅니다. 작업을 선택하면 세부 상태를 볼 수 있습니다.</p>
+        </div>
+        <div class="legend" aria-label="상태 범례">
+          <span><i class="legend-dot running"></i>실행 중</span>
+          <span><i class="legend-dot pending"></i>대기</span>
+          <span><i class="legend-dot complete"></i>완료</span>
+          <span><i class="legend-dot partial"></i>부분 완료</span>
+          <span><i class="legend-dot failed"></i>실패</span>
+          <span><i class="legend-dot no-clue"></i>단서 없음</span>
+        </div>
+      </div>
+      <div class="diagram-scroll">
+        <svg id="graph" viewBox="0 0 1300 850" role="img"
+             aria-label="Investigator에서 Detective, Lab, Assistant로 이어지는 실시간 작업 그래프"></svg>
+      </div>
+    </section>
+
+    <aside class="detail" aria-live="polite">
+      <div>
+        <p class="eyebrow">선택한 작업</p>
+        <h2 id="detail-title">작업을 선택하세요</h2>
+      </div>
+      <div id="detail-body" class="detail-body">이 화면은 로컬 작업 상태만 표시하며 분석 근거나 비밀 값은 읽지 않습니다.</div>
+    </aside>
+    <footer>로컬 상태 파일을 1초마다 읽습니다. 화면을 닫아도 분석은 계속됩니다.</footer>
+  </main>
+</body>
+</html>

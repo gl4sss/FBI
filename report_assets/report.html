@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FBI 보안 분석 보고서 — ${firmware_name}</title>
+  <link rel="stylesheet" href="report.css">
+</head>
+<body>
+<div class="container">
+  <header>
+    <div class="subtitle">FBI ${version} — Firmware Binary Inspector · 보안 분석 보고서</div>
+    <h1>${firmware_name}</h1>
+    <div class="header-meta">분석 일시: ${now} &nbsp;|&nbsp; 세션: ${session_name}</div>
+    <div class="risk-banner ${risk_cls}">평가 위험도: ${risk_ko} (${overall_risk}) · ${risk_note}</div>
+  </header>
+
+  <h2>1. 펌웨어 개요</h2>
+  <div class="meta-grid">
+    <div class="meta-item"><div class="meta-label">파일명</div><div class="meta-value">${firmware_name}</div></div>
+    <div class="meta-item"><div class="meta-label">파일 크기</div><div class="meta-value">${size_display}</div></div>
+    <div class="meta-item"><div class="meta-label">파일 유형</div><div class="meta-value">${file_type}</div></div>
+    <div class="meta-item"><div class="meta-label">MD5</div><div class="meta-value">${md5}</div></div>
+    <div class="meta-item wide"><div class="meta-label">SHA256</div><div class="meta-value">${sha256}</div></div>
+  </div>
+
+  <h2>2. 경영진 요약</h2>
+  <div class="summary-box">${exec_summary}</div>
+  <div class="section-box"><h3>주요 발견사항</h3>${key_findings_section}</div>
+
+  <h2>3. 분석 범위 및 검증 기준</h2>
+  <div class="section-box">저장 세션 <code>${session_name}</code>의 작업 결과 ${task_count}건을 바탕으로 작성했습니다. ${coverage_text}${inventory_text}${research_time_text}의심 위치 ${candidate_count}건을 개별 항목으로 기록했습니다. 관찰 근거가 없는 항목은 미검증으로 표시합니다. '재현 확인'은 실행한 명령 또는 산출물, 관찰 결과, 트리거 근거가 기록된 경우입니다. '이번 테스트 미재현'과 '재현 미실시'는 취약점이 없다는 뜻이 아닙니다.</div>
+  ${goal_audit_html}
+  ${specialist_html}
+  ${pipeline_html}
+
+  <h2>4. 발견사항 요약</h2>
+  <div class="sev-summary">
+    <span class="sev-chip critical">긴급 ${critical_count}건</span>
+    <span class="sev-chip high">높음 ${high_count}건</span>
+    <span class="sev-chip medium">보통 ${medium_count}건</span>
+    <span class="sev-chip low">낮음 ${low_count}건</span>
+    <span class="sev-chip info">정보 ${info_count}건</span>
+  </div>
+  ${vuln_table}
+
+  <h2>5. 발견사항 상세</h2>
+  ${vuln_cards}
+
+  <h2>6. 공격 표면 분석</h2>
+  <div class="section-box">${attack_surface}${components_html}</div>
+
+  <h2>7. 암호화 구현 평가</h2>
+  <div class="section-box">${crypto_assessment}</div>
+
+  <h2>8. PoC 가능성 및 한계</h2>
+  <div class="section-box">${poc_potential}${confirmed_html}<h3>검증 한계</h3>${limitations_section}</div>
+
+  <h2>9. 결론 및 권고사항</h2>
+  <div class="conclusion-box">${conclusion}</div>
+
+  <div class="footer">
+    FBI ${version} — Firmware Binary Inspector &nbsp;|&nbsp; 보고서 생성: ${now}<br>
+    Codex 오케스트레이터와 워커를 사용한 펌웨어 분석
+  </div>
+</div>
+</body>
+</html>

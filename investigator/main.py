@@ -12,6 +12,7 @@ import json
 import math
 import os
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -33,6 +34,7 @@ from shared.session_manager import SessionManager
 from shared.resume import (load_completed_tasks, load_sent_task_ids,
                            verify_resume_firmware)
 from shared.validation import validate_specialist_scope
+from shared.version import VERSION
 
 
 def load_settings(path: str) -> dict:
@@ -103,6 +105,15 @@ def _dispatch_tasks(new_tasks, worker, session_mgr, firmware_path, extracted_dir
                     parallel_limit, cfg_worker, on_finding=None, task_runner=None) -> list[dict]:
     """new_tasks를 Codex 워커에 병렬 전송하고 completed 형태로 반환."""
     task_results: dict[str, dict] = {}
+    session_locks: dict[str, threading.Lock] = {}
+
+    def run_one(task, existing_sid):
+        runner = task_runner or (lambda w, t, sid, fw, root:
+                                 w.execute(t, sid, fw, root))
+        if not existing_sid:
+            return runner(worker, task, existing_sid, firmware_path, extracted_dir)
+        with session_locks[existing_sid]:
+            return runner(worker, task, existing_sid, firmware_path, extracted_dir)
 
     with ThreadPoolExecutor(max_workers=parallel_limit) as executor:
         futures: dict = {}
@@ -110,10 +121,9 @@ def _dispatch_tasks(new_tasks, worker, session_mgr, firmware_path, extracted_dir
             existing_sid = session_mgr.get_session_id(
                 task["task_id"], task.get("reuse_session_for")
             )
-            runner = task_runner or (lambda w, t, sid, fw, root:
-                                     w.execute(t, sid, fw, root))
-            fut = executor.submit(runner, worker, task, existing_sid,
-                                  firmware_path, extracted_dir)
+            if existing_sid:
+                session_locks.setdefault(existing_sid, threading.Lock())
+            fut = executor.submit(run_one, task, existing_sid)
             futures[fut] = task
 
         for fut in as_completed(futures):
@@ -199,6 +209,9 @@ def run_analysis(firmware_path: str, settings: dict, resume_from: str | None = N
     parallel_limit = cfg_worker["parallel_limit"]
     if parallel_limit < 1:
         raise ValueError("worker.parallel_limit must be positive")
+    specialist_task_limit = int(cfg_analysis.get("max_specialist_tasks_per_run", 60))
+    if specialist_task_limit < 0:
+        raise ValueError("analysis.max_specialist_tasks_per_run must be nonnegative")
     research_minutes = float(cfg_analysis.get("research_minutes", 0))
     if not math.isfinite(research_minutes) or research_minutes < 0:
         raise ValueError("analysis.research_minutes must be a finite nonnegative number")
@@ -342,7 +355,11 @@ def run_analysis(firmware_path: str, settings: dict, resume_from: str | None = N
     if resume_from and scope_path.exists():
         previous_scope = json.loads(scope_path.read_text(encoding="utf-8"))
         if previous_scope.get("targets") != code_files:
-            raise ExtractionError("extracted code files changed since the saved scan scope")
+            expanded = (specialists and extraction.get("scope_expanded") and
+                        set(previous_scope.get("targets") or []).issubset(code_files))
+            if not expanded:
+                raise ExtractionError("extracted code files changed since the saved scan scope")
+            print("[Resume] Expanded a previously opaque filesystem; adding its files to scan scope")
         if specialists:
             save_scan_scope(logger.get_session_path(), sweep_tasks, code_files,
                             inventory=inventory, **scope_extras)
@@ -418,7 +435,18 @@ def run_analysis(firmware_path: str, settings: dict, resume_from: str | None = N
     def budget_available() -> bool:
         return deadline is None or time.monotonic() < deadline
 
-    def dispatch_stage(tasks: list[dict], label: str) -> None:
+    specialist_dispatched = 0
+    attempted_this_run = set()
+
+    def dispatch_stage(tasks: list[dict], label: str, stage_limit: int | None = None) -> None:
+        nonlocal specialist_dispatched
+        if specialists:
+            remaining = (specialist_task_limit - specialist_dispatched
+                         if specialist_task_limit else len(tasks))
+            allowed = min(len(tasks), max(0, remaining))
+            if stage_limit is not None:
+                allowed = min(allowed, stage_limit)
+            tasks = tasks[:allowed]
         for start in range(0, len(tasks), parallel_limit):
             if not budget_available():
                 return
@@ -429,15 +457,30 @@ def run_analysis(firmware_path: str, settings: dict, resume_from: str | None = N
                 parallel_limit, cfg_worker, on_finding,
                 selected_runner if specialists else task_runner,
             ))
+            if specialists:
+                specialist_dispatched += len(batch)
+                attempted_this_run.update(task["task_id"] for task in batch)
 
-    dispatch_stage(pending_sweep, "Specialist Review" if specialists else "Code Review Sweep")
+    if specialists and completed_tasks and specialist_task_limit:
+        saved_followups = [task for task in followup_tasks(completed_tasks)
+                           if task["task_id"] not in completed_ids]
+        dispatch_stage(saved_followups, "Saved Specialist Follow-up",
+                       stage_limit=max(1, specialist_task_limit // 4))
+
+    sweep_limit = None
+    if specialists and specialist_task_limit:
+        sweep_limit = max(1, specialist_task_limit - specialist_dispatched -
+                          max(1, specialist_task_limit // 4))
+    dispatch_stage(pending_sweep, "Specialist Review" if specialists else "Code Review Sweep",
+                   stage_limit=sweep_limit)
 
     if specialists and budget_available():
         completed_ids = {task.get("task_id") for task in completed_tasks
                          if (task.get("result") or {}).get("status") == "completed"}
         latest_tasks = list({task.get("task_id"): task for task in completed_tasks}.values())
         pending_followups = [task for task in followup_tasks(latest_tasks)
-                             if task["task_id"] not in completed_ids]
+                             if task["task_id"] not in completed_ids
+                             and task["task_id"] not in attempted_this_run]
         dispatch_stage(pending_followups, "Specialist Static Follow-up")
 
     pending_baseline = []
@@ -511,10 +554,19 @@ def run_analysis(firmware_path: str, settings: dict, resume_from: str | None = N
         print("[*] Research time budget reached; remaining work is recorded for resume")
 
     latest_tasks = list({task.get("task_id"): task for task in completed_tasks}.values())
+    complete_specialist_ids = {task.get("task_id") for task in latest_tasks
+                               if (task.get("result") or {}).get("status") == "completed"}
+    specialist_followups_pending = (sum(
+        task["task_id"] not in complete_specialist_ids
+        for task in followup_tasks(latest_tasks)) if specialists else 0)
     if specialists and stop_reason == "specialist_sweep_complete" and any(
             (task.get("result") or {}).get("status") in {"partial", "failed"}
             for task in latest_tasks if task.get("type", "").startswith("specialist_")):
         stop_reason = "specialist_incomplete"
+    if specialists and specialist_task_limit and stop_reason == "specialist_sweep_complete":
+        if (any(task["task_id"] not in complete_specialist_ids for task in sweep_tasks)
+                or specialist_followups_pending):
+            stop_reason = "specialist_task_budget_reached"
 
     stage_ids = {task.get("task_id") for task in completed_tasks}
     all_finding_tasks = (finding_research_tasks(completed_tasks)
@@ -533,6 +585,13 @@ def run_analysis(firmware_path: str, settings: dict, resume_from: str | None = N
         "specialist_tasks_total": len(sweep_tasks) if specialists else None,
         "specialist_tasks_recorded": sum(task["task_id"] in stage_ids for task in sweep_tasks)
         if specialists else None,
+        "specialist_task_limit": specialist_task_limit if specialists else None,
+        "specialist_tasks_dispatched_this_run": specialist_dispatched if specialists else None,
+        "specialist_tasks_pending": sum(task["task_id"] not in {
+            saved.get("task_id") for saved in completed_tasks
+            if (saved.get("result") or {}).get("status") == "completed"}
+            for task in sweep_tasks) if specialists else None,
+        "specialist_followups_pending": specialist_followups_pending if specialists else None,
         "no_applicable_clue_files": sum(
             item.get("status") == "no_applicable_clue"
             for item in scope_extras.get("file_routing", [])) if specialists else None,
@@ -576,11 +635,14 @@ def main():
     parser = argparse.ArgumentParser(
         description="FBI Investigator — Codex 기반 펌웨어 취약점 분석"
     )
+    parser.add_argument("--version", action="version", version=f"FBI {VERSION}")
     parser.add_argument("firmware", help="분석 대상 펌웨어 바이너리 경로 (구버전/취약 버전)")
     parser.add_argument("--research-minutes", type=float, default=None,
                         help="이번 실행의 리서치 시간 예산(분). 진행 중인 작업은 완료 후 중단")
     parser.add_argument("--max-iterations", type=int, default=None,
                         help="세션의 최대 오케스트레이터 반복 횟수 재설정")
+    parser.add_argument("--max-specialist-tasks", type=int, default=None,
+                        help="통합 실행에서 이번 회차의 전담 작업 한도(0은 무제한)")
     parser.add_argument("--allow-network-research", action="store_true",
                         help="워커의 외부 1차 자료 조회 허용(펌웨어 업로드 금지)")
     parser.add_argument("--settings", default=default_settings, help="settings.json 경로")
@@ -623,6 +685,10 @@ def main():
         if args.max_iterations < 1:
             parser.error("--max-iterations must be positive")
         settings["analysis"]["max_iterations"] = args.max_iterations
+    if args.max_specialist_tasks is not None:
+        if args.max_specialist_tasks < 0:
+            parser.error("--max-specialist-tasks must be nonnegative")
+        settings["analysis"]["max_specialist_tasks_per_run"] = args.max_specialist_tasks
     if args.allow_network_research:
         settings["worker"]["network_access"] = True
     try:

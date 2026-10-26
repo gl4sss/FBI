@@ -26,6 +26,7 @@ flowchart LR
 - `codex_client.py`: Codex CLI 실행과 세션 ID 추출
 - `validation.py`: 작업 계획 및 워커 결과 검증
 - `redaction.py`: 일반적인 자격증명 값과 개인키 블록을 저장·보고 전에 가림
+- `version.py`: FBI 2.0 버전 문자열을 CLI에서 공통으로 사용
 - `resume.py`: 저장된 작업 결과 복원
 - `prompting.py`: 펌웨어·세션 자료의 입력 경계 표시
 - `logger.py`: 오케스트레이터 및 워커 대화 기록

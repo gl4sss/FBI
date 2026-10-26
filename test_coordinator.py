@@ -608,6 +608,51 @@ class CoordinatorTests(unittest.TestCase):
             self.assertEqual(second["status"], "completed")
             self.assertEqual(coordinator.state.get("specialist", key)["attempts"], 2)
 
+    def test_specialist_task_limit_defers_work_and_resumes_next_run(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            firmware = root / "fixture.bin"
+            firmware.write_bytes(b"synthetic firmware")
+            coordinator = Coordinator(firmware, root / "state", no_qemu=True,
+                                      max_specialist_tasks=1)
+            info = {"path": str(firmware), "filename": firmware.name,
+                    "file_type": "data", "size_bytes": firmware.stat().st_size,
+                    "hashes": {"sha256": coordinator.firmware_sha256, "md5": "fixture"},
+                    "strings_sample": [], "binwalk": None}
+            calls = []
+
+            def fake_extract(path, session_dir, sha, timeout=300):
+                extracted = Path(session_dir) / "extracted"
+                extracted.mkdir(exist_ok=True)
+                (extracted / "app.elf").write_bytes(b"\x7fELF\x00generic application")
+                return {"status": "complete", "output_dir": str(extracted),
+                        "file_count": 1}
+
+            def fake_worker(self, task, session_id, path, extracted_dir):
+                calls.append(task["task_id"])
+                return {"task_id": task["task_id"], "status": "completed",
+                        "reviewed_files": task["scope_files"], "findings": [],
+                        "suspected_findings": []}
+
+            with patch("investigator.main.analyze_firmware", return_value=info), \
+                 patch("investigator.main.extract_firmware", side_effect=fake_extract), \
+                 patch("investigator.main.Worker.execute", fake_worker), \
+                 patch("report_generator.generate_report", return_value="report.html"), \
+                 redirect_stdout(io.StringIO()):
+                coordinator.run()
+                research = json.loads((Path(coordinator.investigator_session) /
+                                       "research_status.json").read_text())
+                self.assertEqual(research["stop_reason"], "specialist_task_budget_reached")
+                self.assertEqual(research["specialist_tasks_pending"], 1)
+                self.assertEqual(coordinator.state.summary()["investigator"]["partial"], 1)
+                restarted = Coordinator(firmware, root / "state", no_qemu=True,
+                                        max_specialist_tasks=1)
+                restarted.run()
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(len(set(calls)), 2)
+            self.assertEqual(restarted.state.summary()["specialist"]["complete"], 2)
+            self.assertEqual(restarted.state.summary()["investigator"]["complete"], 1)
+
     def test_crash_between_codex_log_and_task_state_is_reconciled(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)

@@ -2,6 +2,7 @@
 
 import hashlib
 import re
+from collections import deque
 from pathlib import Path
 
 
@@ -147,7 +148,16 @@ def plan_specialists(inventory: list[dict], extracted_dir: str | Path) -> tuple[
          "reason": "" if counts[identifier] else "No relevant clue in extracted files"}
         for identifier, title in SPECIALISTS
     ]
-    return tasks, {"specialists": specialists, "file_routing": routing,
+    # Keep limited runs distributed across all fixed domains.
+    queues = {identifier: deque(task for task in tasks
+                                if task["specialist_id"] == identifier)
+              for identifier, _ in SPECIALISTS}
+    balanced = []
+    while any(queues.values()):
+        for identifier, _ in SPECIALISTS:
+            if queues[identifier]:
+                balanced.append(queues[identifier].popleft())
+    return balanced, {"specialists": specialists, "file_routing": routing,
                    "mode": "specialists"}
 
 

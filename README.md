@@ -1,4 +1,4 @@
-# FBI (Firmware Binary Inspector)
+# FBI 2.0 (Firmware Binary Inspector)
 
 FBI는 Codex CLI로 펌웨어 바이너리를 분석하는 로컬 도구입니다. 통합 실행기는 펌웨어 추출 후 모든 파일을 목록화하고 고정된 10개 전담 분야에 관련 파일을 배정합니다. 실행 검증이 필요한 발견사항은 즉시 Detective로 전달하고, 필요하면 Lab과 Assistant를 연결합니다. 각 단계의 결과는 세션과 한국어 HTML 보고서에 남습니다.
 
@@ -13,7 +13,8 @@ FBI는 Codex CLI로 펌웨어 바이너리를 분석하는 로컬 도구입니�
 | [`assistant/`](assistant/README.md) | Detective 결과를 바탕으로 공격 체인 분석 및 스크립트 생성 |
 | [`shared/`](shared/README.md) | Codex 실행, 세션 로그, MCP 설정 등 공통 코드 |
 | `qa.py` | 저장된 세션을 사용한 질의응답 |
-| `report_generator.py` | 세션 기반 한국어 HTML 보고서 생성 |
+| [`report_generator.py`](report_generator.py) | 세션 기반 한국어 HTML 보고서 생성 |
+| [`report_assets/`](report_assets/README.md) | 재사용하는 보고서 HTML·CSS 템플릿 |
 | [`REPORT_FORMAT.md`](REPORT_FORMAT.md) | 보고서 목차와 검증 상태 기준 |
 | [`LICENSE`](LICENSE) | Apache License 2.0 전문 |
 
@@ -28,6 +29,7 @@ flowchart LR
     SPEC -->|"정적 근거 확인"| IR
     SPEC -->|"동적 검증 필요"| CO
     CO --> DET["Detective<br/>발견사항별 검증"]
+    CO --> LIVE["로컬 작업 대시보드<br/>실시간 상태 그래프"]
     DET -->|"환경 필요"| CO
     CO --> LAB["Lab<br/>동적 분석 환경 구성"]
     DET -->|"검증된 결과"| CO
@@ -80,14 +82,14 @@ flowchart LR
 
 - Python 3.10 이상
 - 로컬에 설치하고 인증한 `codex` CLI
-- `file`, `strings`, `binwalk` 명령. `binwalk`는 분석 전 추출에 필요합니다.
+- `file`, `strings`, `binwalk` 명령. SquashFS 내부 파일까지 검토하려면 `unsquashfs`도 필요합니다.
 - 동적 분석에는 대상 아키텍처에 맞는 QEMU가 별도로 필요할 수 있습니다.
 
 각 단계의 `settings.json`은 `gpt-6-sol`을 기본 모델로 사용합니다. 오케스트레이션의 추론 수준은 `medium`, 분석 워커는 `high`입니다. `qa.py`와 `report_generator.py`도 기본적으로 `high`를 사용합니다. MCP 서버 목록은 비어 있으며, 필요한 서버는 설정의 `mcp.servers`에 추가할 수 있습니다.
 
 Investigator 워커는 세션 디렉터리를 작업 루트로 삼아 분석 산출물을 작성할 수 있고, Detective·Lab·Assistant 워커도 작업 공간 쓰기 권한으로 실행합니다. 워커의 네트워크 접근은 기본적으로 꺼져 있습니다. 통합 실행의 `--allow-network-research`는 외부 구성요소 담당에게만 공식 자료 조회를 허용합니다. 개별 Investigator 명령의 같은 옵션은 기존 워커에 적용됩니다. 다른 단계는 해당 `settings.json`의 `worker.network_access`를 변경할 수 있습니다. 워커 결과의 `evidence`는 관찰 근거, `inferences`는 아직 검증되지 않은 해석을 뜻합니다.
 Investigator·Lab·Assistant의 재개 실행은 기존 세션 디렉터리에 작업 결과를 이어서 기록합니다. Investigator와 Lab은 펌웨어 SHA256이 이전 세션과 일치하는지 확인합니다.
-Investigator는 기본 정보 수집 후 세션의 `extracted/`에 펌웨어를 추출합니다. 실제 추출 파일이 확인되면 그 경로를 오케스트레이터와 워커에 전달해 분석을 시작합니다. 추출 도구가 없거나 추출 결과가 비어 있으면 분석을 시작하지 않고 `extraction.json`에 이유를 기록합니다. 재개할 때는 검증된 추출 결과를 다시 사용합니다.
+Investigator는 기본 정보 수집 후 세션의 `extracted/`에 펌웨어를 재귀 추출합니다. Binwalk가 SquashFS 이미지만 남긴 경우 `unsquashfs`로 내부 파일을 추가 추출합니다. 일부 장치 노드는 일반 사용자 권한으로 복원되지 않을 수 있으며, 그 이유는 `extraction.json`과 보고서에 남깁니다. 추출 도구가 없거나 추출 결과가 비어 있으면 분석을 시작하지 않습니다. 이전 세션의 불완전한 추출도 재개 시 확장합니다.
 
 ## 실행
 
@@ -97,8 +99,11 @@ Investigator는 기본 정보 수집 후 세션의 `extracted/`에 펌웨어를 
 # 통합 실행: 전담 분야별 검토와 필요한 발견사항의 후속 검증
 python3 coordinator/main.py path/to/firmware.bin
 
-# 동시 작업 수 조정, 외부 1차 자료 조회 허용
-python3 coordinator/main.py path/to/firmware.bin --investigator-workers 3 --detective-workers 2 --allow-network-research
+# 동시 작업 수와 회차별 전담 작업 한도 조정, 외부 1차 자료 조회 허용
+python3 coordinator/main.py path/to/firmware.bin --investigator-workers 3 --detective-workers 2 --max-specialist-tasks 60 --allow-network-research
+
+# 별도 터미널에서 실시간 작업 그래프 열기
+python3 coordinator/dashboard.py path/to/firmware.bin
 
 # 기존 개별 실행 명령
 python3 investigator/main.py path/to/firmware.bin
@@ -115,11 +120,17 @@ python3 detective/main.py --session path/to/investigator-session --no-qemu
 # 세션 기반 질의응답 및 보고서 재생성
 python3 qa.py --session path/to/session "분석 결과를 요약해줘"
 python3 report_generator.py --session path/to/session
+# 저장된 요약을 무시하고 보고서 내용을 다시 요청
+python3 report_generator.py --session path/to/session --refresh-summary
 ```
 
 `main.py`는 기존 명령 호환용 진입점이며 `investigator/main.py`로 연결됩니다. 각 명령의 옵션은 `--help`에서 확인할 수 있습니다.
 
+보고서는 고정된 [`report.html`](report_assets/report.html)·[`report.css`](report_assets/report.css)에 세션 데이터를 채워 생성합니다. Codex는 HTML·CSS를 작성하지 않고 발견사항의 서술 데이터만 JSON으로 반환합니다. 동일한 세션 내용·모델·프롬프트로 다시 생성하면 `report_summary_cache.json`을 재사용해 Codex 호출을 생략합니다. 출력 폴더에 CSS를 함께 복사하므로 HTML 파일을 바로 열 수 있습니다.
+
 통합 실행 상태는 `sessions/coordinator/<펌웨어 SHA256>/pipeline_status.json`에 기록됩니다. 같은 펌웨어를 다시 실행하면 저장된 Investigator 세션과 미완료 작업을 복원합니다. `first_detective_start_seconds`는 통합 실행 시작부터 첫 Detective 작업까지, `elapsed_seconds`는 연계 작업 완료까지의 시간이며 최종 보고서 재생성 시간은 포함하지 않습니다. 두 값은 실제 펌웨어와 실행 환경에 따라 달라집니다.
+
+내부 파일시스템이 큰 펌웨어는 전담 작업이 수천 건으로 늘 수 있습니다. 기본 한도는 실행당 60건이며, 남은 건은 `research_status.json`에 기록됩니다. 같은 통합 명령을 다시 실행하면 미완료 작업부터 이어서 처리합니다. `--max-specialist-tasks 0`은 회차 제한을 해제합니다.
 
 Investigator 세션의 `scan_scope.json`에는 파일별 라우팅 이유, 10개 분야의 적용 상태와 프롬프트 버전, 읽지 못한 파일의 이유가 있습니다. `task_results.jsonl`에는 분야별 작업과 검토 결과가 남습니다. 통합 실행의 `--max-iterations`는 호환성을 위해 유지되며, 현재 전담 분야 모드의 포괄 오케스트레이터 반복에는 사용되지 않습니다. 정적 근거 확인은 코드·설정의 관찰을 뜻하고, `재현 확인`은 기록된 실행 테스트에만 사용합니다. 비밀 값은 저장·보고 전에 일반적인 자격증명 패턴으로 가리지만, 임의 형식의 비밀까지 자동으로 식별한다고 보장하지 않습니다.
 

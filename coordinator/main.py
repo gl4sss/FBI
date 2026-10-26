@@ -23,6 +23,7 @@ from investigator.main import run_analysis
 from lab.main import run_lab
 from shared.redaction import collect_secret_values, redact_record
 from shared.validation import validate_specialist_scope
+from shared.version import VERSION
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -55,7 +56,8 @@ class Coordinator:
     def __init__(self, firmware: str | Path, state_root: str | Path = "./sessions/coordinator",
                  *, investigator_limit: int = 3, detective_limit: int = 2,
                  allow_network_research: bool = False, no_qemu: bool = False,
-                 research_minutes: float | None = None, max_iterations: int | None = None):
+                 research_minutes: float | None = None, max_iterations: int | None = None,
+                 max_specialist_tasks: int | None = None):
         self.firmware = Path(firmware).resolve()
         self.firmware_sha256 = _sha256(self.firmware)
         self.state_root = Path(state_root).resolve()
@@ -68,6 +70,7 @@ class Coordinator:
         self.detective_limit = detective_limit
         self.research_minutes = research_minutes
         self.max_iterations = max_iterations
+        self.max_specialist_tasks = max_specialist_tasks
         self._mutex = threading.Lock()
         self._submitted: set[tuple[str, str]] = set()
         self._detective_pool = None
@@ -387,6 +390,8 @@ class Coordinator:
                     settings["analysis"]["research_minutes"] = self.research_minutes
                 if self.max_iterations is not None:
                     settings["analysis"]["max_iterations"] = self.max_iterations
+                if self.max_specialist_tasks is not None:
+                    settings["analysis"]["max_specialist_tasks_per_run"] = self.max_specialist_tasks
                 resume = self._resume_investigator_session()
                 analysis_error = None
                 self.state.start("investigator", self.firmware_sha256,
@@ -398,14 +403,25 @@ class Coordinator:
                                  on_extracted=self._on_extracted,
                                  task_runner=self._run_specialist_task,
                                  task_reconcile=self._reconcile_specialist_task)
+                    stop_reason = None
                     if self.investigator_session:
                         research_path = Path(self.investigator_session) / "research_status.json"
                         if research_path.exists():
                             research = json.loads(research_path.read_text(encoding="utf-8"))
-                            if research.get("stop_reason") == "orchestrator_error":
+                            stop_reason = research.get("stop_reason")
+                            if stop_reason == "orchestrator_error":
                                 raise RuntimeError("Investigator orchestrator failed; rerun to resume")
-                    self.state.finish("investigator", self.firmware_sha256, "complete",
-                                      {"session_path": self.investigator_session})
+                    incomplete = stop_reason in {
+                        "specialist_incomplete", "specialist_task_budget_reached",
+                        "time_budget_reached",
+                    }
+                    self.state.finish("investigator", self.firmware_sha256,
+                                      "partial" if incomplete else "complete",
+                                      {"session_path": self.investigator_session,
+                                       "stop_reason": stop_reason})
+                    if incomplete:
+                        print(f"[Coordinator] Investigator remains partial: {stop_reason}. "
+                              "Run the same command to continue.")
                 except Exception as exc:
                     analysis_error = exc
                     if not self.investigator_session:
@@ -448,6 +464,7 @@ class Coordinator:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Integrated FBI firmware analysis")
+    parser.add_argument("--version", action="version", version=f"FBI {VERSION}")
     parser.add_argument("firmware", help="Firmware image to inspect")
     parser.add_argument("--state-root", default="./sessions/coordinator")
     parser.add_argument("--investigator-workers", type=int, default=3)
@@ -456,6 +473,8 @@ def main() -> None:
     parser.add_argument("--no-qemu", action="store_true")
     parser.add_argument("--research-minutes", type=float, default=None)
     parser.add_argument("--max-iterations", type=int, default=None)
+    parser.add_argument("--max-specialist-tasks", type=int, default=None,
+                        help="Per-run specialist task limit (0 means unlimited)")
     args = parser.parse_args()
     if args.investigator_workers < 1 or args.detective_workers < 1:
         parser.error("worker limits must be positive")
@@ -464,13 +483,16 @@ def main() -> None:
     if args.research_minutes is not None and (
             not math.isfinite(args.research_minutes) or args.research_minutes < 0):
         parser.error("--research-minutes must be a finite nonnegative number")
+    if args.max_specialist_tasks is not None and args.max_specialist_tasks < 0:
+        parser.error("--max-specialist-tasks must be nonnegative")
     result = Coordinator(args.firmware, args.state_root,
                          investigator_limit=args.investigator_workers,
                          detective_limit=args.detective_workers,
                          allow_network_research=args.allow_network_research,
                          no_qemu=args.no_qemu,
                          research_minutes=args.research_minutes,
-                         max_iterations=args.max_iterations).run()
+                         max_iterations=args.max_iterations,
+                         max_specialist_tasks=args.max_specialist_tasks).run()
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

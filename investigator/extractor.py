@@ -2,12 +2,85 @@
 
 import json
 import os
+import shutil
 import subprocess
+import time
 from pathlib import Path
 
 
 class ExtractionError(RuntimeError):
     """Raised when extraction cannot supply files for analysis."""
+
+
+NESTED_EXTRACTION_VERSION = 1
+SQUASHFS_MAGIC = (b"hsqs", b"sqsh", b"qshs", b"shsq")
+
+
+def _expand_squashfs(root: Path, deadline: float, max_images: int = 12) -> list[dict]:
+    """Unpack SquashFS containers Binwalk left as opaque image files."""
+    records = []
+    processed = set()
+    while len(processed) < max_images:
+        images = []
+        for directory, folders, names in os.walk(root, followlinks=False):
+            folders[:] = [name for name in folders
+                          if not (Path(directory) / name).is_symlink()]
+            for name in names:
+                path = Path(directory) / name
+                if path in processed or path.is_symlink():
+                    continue
+                try:
+                    with path.open("rb") as stream:
+                        if stream.read(4) in SQUASHFS_MAGIC:
+                            images.append(path)
+                except OSError:
+                    continue
+        if not images:
+            break
+        for image in images[:max_images - len(processed)]:
+            processed.add(image)
+            relative = str(image.relative_to(root))
+            destination = image.with_name(image.name + ".root")
+            if destination.is_dir() and _inventory(destination)[0]:
+                records.append({"source": relative, "status": "reused",
+                                "file_count": _inventory(destination)[0]})
+                continue
+            if destination.exists():
+                retry = 1
+                while destination.exists():
+                    destination = image.with_name(image.name + f".root_retry_{retry}")
+                    retry += 1
+            if time.monotonic() >= deadline:
+                records.append({"source": relative, "status": "failed",
+                                "reason": "extraction time budget reached"})
+                continue
+            if not shutil.which("unsquashfs"):
+                records.append({"source": relative, "status": "failed",
+                                "reason": "unsquashfs is not installed"})
+                continue
+            if image.stat().st_size > 512 * 1024 * 1024:
+                records.append({"source": relative, "status": "failed",
+                                "reason": "SquashFS image exceeds 512 MiB extraction limit"})
+                continue
+            destination.mkdir()
+            command = ["unsquashfs", "-quiet", "-no-progress", "-no-xattrs",
+                       "-ignore-errors", "-dest", str(destination), str(image)]
+            try:
+                result = subprocess.run(command, capture_output=True, text=True,
+                                        timeout=max(1, deadline - time.monotonic()))
+                count = _inventory(destination)[0]
+                if not count:
+                    shutil.rmtree(destination)
+                records.append({"source": relative,
+                                "status": ("partial" if result.returncode and count else
+                                           "complete" if count else "failed"),
+                                "file_count": count,
+                                "reason": (result.stderr or "")[-500:] if result.returncode else ""})
+            except subprocess.TimeoutExpired:
+                shutil.rmtree(destination)
+                records.append({"source": relative, "status": "failed",
+                                "reason": "unsquashfs exceeded extraction time budget"})
+    return records
 
 
 def _inventory(root: Path) -> tuple[int, list[str], int]:
@@ -32,6 +105,7 @@ def extract_firmware(firmware_path: str, session_dir: str | Path,
     """Run Binwalk extraction and return a verified session-local manifest."""
     session = Path(session_dir).resolve()
     manifest_path = session / "extraction.json"
+    deadline = time.monotonic() + timeout
 
     if manifest_path.exists():
         prior = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -41,6 +115,19 @@ def extract_firmware(firmware_path: str, session_dir: str | Path,
                 prior_dir.is_dir() and prior_dir.resolve().is_relative_to(session)):
             count, sample, symlinks = _inventory(prior_dir)
             if count:
+                needs_retry = (prior.get("nested_extraction_version") != NESTED_EXTRACTION_VERSION
+                               or any(item.get("status") == "failed"
+                                      for item in prior.get("nested_extraction") or []))
+                if needs_retry:
+                    nested = _expand_squashfs(prior_dir, deadline)
+                    count, sample, symlinks = _inventory(prior_dir)
+                    prior.update({"nested_extraction_version": NESTED_EXTRACTION_VERSION,
+                                  "nested_extraction": nested, "file_count": count,
+                                  "files_sample": sample, "symlink_count": symlinks,
+                                  "scope_expanded": (prior.get("scope_expanded", False)
+                                                     or count > prior.get("file_count", 0))})
+                    manifest_path.write_text(json.dumps(prior, ensure_ascii=False, indent=2),
+                                             encoding="utf-8")
                 return {**prior, "file_count": count, "files_sample": sample,
                         "symlink_count": symlinks, "reused": True}
 
@@ -51,7 +138,7 @@ def extract_firmware(firmware_path: str, session_dir: str | Path,
         retry += 1
     output_dir.mkdir(parents=True)
 
-    command = ["binwalk", "--extract", "--directory", str(output_dir),
+    command = ["binwalk", "--extract", "--matryoshka", "--directory", str(output_dir),
                str(Path(firmware_path).resolve())]
     try:
         result = subprocess.run(command, capture_output=True, text=True,
@@ -67,6 +154,7 @@ def extract_firmware(firmware_path: str, session_dir: str | Path,
         exit_code, stdout, stderr = None, "", ""
         error = f"binwalk extraction exceeded {timeout} seconds"
 
+    nested = _expand_squashfs(output_dir, deadline)
     count, sample, symlinks = _inventory(output_dir)
     if not error and exit_code != 0:
         error = f"binwalk exited with code {exit_code}: {stderr or stdout or 'no details'}"
@@ -83,6 +171,8 @@ def extract_firmware(firmware_path: str, session_dir: str | Path,
         "binwalk_exit_code": exit_code,
         "binwalk_stdout": stdout,
         "binwalk_stderr": stderr,
+        "nested_extraction_version": NESTED_EXTRACTION_VERSION,
+        "nested_extraction": nested,
         "error": error,
     }
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2),

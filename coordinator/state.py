@@ -145,7 +145,7 @@ class StateStore:
                     self.finish(kind, key, "failed", {"error": "job ended without a result"})
 
     def finish(self, kind: str, key: str, status: str, result: dict) -> None:
-        if status not in {"complete", "failed"}:
+        if status not in {"complete", "partial", "failed"}:
             raise ValueError(f"Invalid final status: {status}")
         with self._connect() as connection:
             connection.execute(
