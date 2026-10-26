@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from shared.logger import ConversationLogger
 from shared.codex_client import run_codex
 from shared.validation import validate_worker_result
+from shared.redaction import collect_secret_values, redact_record
 
 WORKER_OUTPUT_SCHEMA = """
 Return ONLY a valid JSON object — no markdown, no text outside JSON:
@@ -26,6 +27,11 @@ Return ONLY a valid JSON object — no markdown, no text outside JSON:
       "observation": "What the code or tool output actually shows",
       "evidence": ["specific file:line, offset, or command output"],
       "inference": "Potential security consequence; state uncertainty",
+      "input_path": "Observed external or local input path, or unknown",
+      "use_path": "Observed use or sink path, or unknown",
+      "root_cause": "One concise root-cause identifier at the faulty operation",
+      "impact_tags": ["availability, confidentiality, integrity, etc. as applicable"],
+      "disposition": "needs_static_research" | "static_verified" | "needs_dynamic_verification" | "insufficient_evidence",
       "entry_conditions": ["conditions needed to reach this site"],
       "counterevidence": ["observed guards or alternative explanation"],
       "unknowns": ["conditions that still need verification"],
@@ -38,6 +44,7 @@ Return ONLY a valid JSON object — no markdown, no text outside JSON:
     "version": "observed version or unknown",
     "version_evidence": ["exact local file or command output"],
     "configuration_evidence": ["applicability-relevant local settings"],
+    "affected_code_evidence": ["local proof that the affected code is included and enabled"],
     "advisories_checked": false,
     "advisory_sources": ["primary vendor or CVE URL, only if actually checked"],
     "cve_ids": ["CVE ID only when supported by a checked source"],
@@ -85,11 +92,25 @@ class Worker:
     def execute(self, task: dict, session_id: str | None, firmware_path: str,
                 extracted_dir: str) -> dict:
         task_id = task["task_id"]
+        specialist_id = task.get("specialist_id")
+        task_network_access = self.network_access and (
+            not specialist_id or specialist_id == "components")
         network_note = (
             "Network access is enabled for consulting primary vendor or project advisories. "
             "Record the URL and exact version match; never upload firmware or extracted content.\n"
-            if self.network_access else
+            if task_network_access else
             "Network access is disabled; do not claim to have checked external advisories.\n"
+        )
+        component_note = (
+            "For external components, record product, version, build, and configuration "
+            "evidence before considering a CVE. When network access is enabled, check "
+            "primary vendor advisories and CVE records for identified external components; "
+            "otherwise mark this check pending. Record each external component in components "
+            "with local version/configuration evidence and primary source URLs. A name or "
+            "version string alone does not prove applicability.\n"
+            if not specialist_id or specialist_id == "components" else
+            "Record any external component identity clue for the components specialist; "
+            "do not perform a separate CVE lookup in this task.\n"
         )
 
         full_prompt = (
@@ -108,17 +129,17 @@ class Worker:
             f"plus direct evidence. Include exact file_path and line_or_offset when available. "
             f"If a location is only a hypothesis, put it in inferences. "
             f"List files actually inspected in reviewed_files and explain any omissions.\n"
-            f"For external components, record product, version, build, and configuration "
-            f"evidence before considering a CVE. When network access is enabled, check "
-            f"primary vendor advisories and CVE records for identified external components; "
-            f"otherwise mark this check pending. Record each external component in components "
-            f"with local version/configuration evidence and primary source URLs. A name or "
-            f"version string alone does not prove applicability.\n"
+            f"{component_note}"
             f"For a finding_investigation task, trace the reported site to an entry point "
             f"and sink where the artifacts permit it. Check guards, configuration, call "
             f"sites, counterevidence, and prerequisites. Populate investigation with "
             f"specific citations and unknowns; do not equate static plausibility with "
             f"runtime confirmation.\n"
+            f"For specialist tasks, assign exactly one disposition to each finding. "
+            f"Static verification confirms only the observed code or configuration weakness, "
+            f"never a runtime trigger. Ask for dynamic verification only when a controlled "
+            f"execution would answer a concrete unresolved question. Do not copy secret values "
+            f"into the response; identify their file/offset and use path instead. "
             f"For each finding, cite a file, offset, command output, or artifact in evidence. "
             f"Put unverified explanations in inferences. If the target or tool is unavailable, "
             f"return partial or failed with the blocker; do not invent results.\n\n"
@@ -140,7 +161,11 @@ class Worker:
                 "session_id": session_id,
             }
 
-        result_text, actual_session_id = self._call_codex(full_prompt, session_id)
+        if specialist_id and specialist_id != "components":
+            result_text, actual_session_id = self._call_codex(
+                full_prompt, session_id, network_access=False)
+        else:
+            result_text, actual_session_id = self._call_codex(full_prompt, session_id)
 
         result = self._parse_json(result_text)
         if result is None:
@@ -157,13 +182,25 @@ class Worker:
 
         result = validate_worker_result(result, task_id,
                                         expected_finding_id=task.get("source_finding_id"))
-        if not self.network_access:
+        result["specialist_id"] = task.get("specialist_id")
+        result["prompt_version"] = task.get("prompt_version")
+        secret_values = (collect_secret_values(task.get("scope_files") or [])
+                         if specialist_id == "secrets" else ())
+        result = redact_record(result, secret_values)
+        if not task_network_access:
             for component in result.get("components") or []:
                 component["advisories_checked"] = False
                 component["advisory_sources"] = []
                 component["cve_ids"] = []
                 if component.get("applicability") in {"confirmed", "possible"}:
                     component["applicability"] = "unknown"
+            if specialist_id == "components":
+                for finding in result.get("suspected_findings") or []:
+                    if finding.get("disposition") in {"static_verified", "needs_dynamic_verification"}:
+                        finding["disposition"] = "needs_static_research"
+                        result["status"] = "partial"
+                        result["follow_up_needed"] = True
+                        result["follow_up_reason"] = "Primary advisory lookup was not enabled"
         result["session_id"] = actual_session_id
 
         final_session = actual_session_id or log_session
@@ -173,7 +210,8 @@ class Worker:
 
         return result
 
-    def _call_codex(self, prompt: str, session_id: str | None) -> tuple[str, str | None]:
+    def _call_codex(self, prompt: str, session_id: str | None,
+                    *, network_access: bool | None = None) -> tuple[str, str | None]:
         return run_codex(
             prompt,
             model=self.model,
@@ -182,7 +220,7 @@ class Worker:
             sandbox=self.sandbox,
             bypass_approvals=self.bypass_approvals,
             sandbox_permissions=self.sandbox_permissions,
-            network_access=self.network_access,
+            network_access=self.network_access if network_access is None else network_access,
             workdir=str(self.logger.get_session_path().resolve()) if self.logger else None,
         )
 

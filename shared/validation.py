@@ -1,8 +1,35 @@
 """Validate model output before it changes the analysis state."""
 
+from pathlib import Path
+
 
 TASK_STATUSES = {"completed", "partial", "failed"}
 ROADMAP_STATUSES = {"in_progress", "complete", "blocked"}
+SPECIALIST_DISPOSITIONS = {"needs_static_research", "static_verified",
+                           "needs_dynamic_verification", "insufficient_evidence"}
+
+
+def validate_specialist_scope(result: dict, extracted_dir: str,
+                              scope_files: list[str] | None = None) -> dict:
+    """Keep specialist claims in the image and require the assigned file to be reviewed."""
+    root = Path(extracted_dir).resolve()
+    missing = set(scope_files or []) - set(result.get("reviewed_files") or [])
+    if missing:
+        if result.get("status") == "completed":
+            result["status"] = "partial"
+        result["follow_up_needed"] = True
+        result["follow_up_reason"] = "Scoped files not reviewed: " + ", ".join(sorted(missing))
+    for finding in result.get("suspected_findings") or []:
+        if finding.get("disposition") not in {"static_verified", "needs_dynamic_verification"}:
+            continue
+        claimed = Path(finding.get("file_path") or "")
+        if not claimed.resolve().is_relative_to(root) or not claimed.is_file():
+            finding["disposition"] = "needs_static_research"
+            if result.get("status") == "completed":
+                result["status"] = "partial"
+            result["follow_up_needed"] = True
+            result["follow_up_reason"] = "Finding file is missing or outside the extracted directory"
+    return result
 
 
 def _executed_test_evidence(test: dict) -> bool:
@@ -73,7 +100,7 @@ def validate_worker_result(result: dict, task_id: str,
             raise ValueError(f"Task {task_id} has an invalid suspected finding")
         item["finding_id"] = f"{task_id}-{index:03d}"
         for field in ("location", "file_path", "line_or_offset", "title", "category", "observation", "inference",
-                      "recommendation"):
+                      "recommendation", "input_path", "use_path", "root_cause"):
             if not isinstance(item.get(field, ""), str):
                 raise ValueError(f"Task {task_id} has invalid {field} in suspected finding")
         item_evidence = item.setdefault("evidence", [])
@@ -83,10 +110,29 @@ def validate_worker_result(result: dict, task_id: str,
         for value in item_evidence:
             if value and value not in result["evidence"]:
                 result["evidence"].append(value)
-        for field in ("entry_conditions", "counterevidence", "unknowns"):
+        for field in ("entry_conditions", "counterevidence", "unknowns", "impact_tags"):
             values = item.setdefault(field, [])
             if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
                 raise ValueError(f"Task {task_id} has invalid {field} in suspected finding")
+        if task_id.startswith("sp_"):
+            disposition = item.setdefault("disposition", "needs_static_research")
+            if disposition not in SPECIALIST_DISPOSITIONS:
+                raise ValueError(f"Task {task_id} has invalid finding disposition")
+            if disposition in {"static_verified", "needs_dynamic_verification"} and (
+                    not item_evidence or not item.get("file_path") or
+                    not item.get("line_or_offset") or not item.get("input_path") or
+                    not item.get("use_path") or not item.get("observation")):
+                item["disposition"] = "needs_static_research"
+                if result["status"] == "completed":
+                    result["status"] = "partial"
+                result["follow_up_needed"] = True
+                result["follow_up_reason"] = "Specialist claim lacks exact location, observed behavior, input/use path, or direct evidence"
+            if task_id.startswith("sp_secrets_") and item["disposition"] == "static_verified":
+                path = Path(item.get("file_path") or "")
+                context = " ".join((item.get("title") or "", item.get("observation") or "")).lower()
+                if path.suffix.lower() in {".pub", ".crt", ".cer"} or any(
+                        label in context for label in ("public key", "certificate only", "test fixture", "placeholder")):
+                    item["disposition"] = "insufficient_evidence"
     reviewed = result.setdefault("reviewed_files", [])
     if not isinstance(reviewed, list) or any(not isinstance(path, str) for path in reviewed):
         raise ValueError(f"Task {task_id} needs a reviewed_files list")
@@ -96,7 +142,8 @@ def validate_worker_result(result: dict, task_id: str,
     for component in components:
         if not isinstance(component, dict) or not isinstance(component.get("product"), str):
             raise ValueError(f"Task {task_id} has an invalid component")
-        for field in ("version_evidence", "configuration_evidence", "advisory_sources", "cve_ids"):
+        for field in ("version_evidence", "configuration_evidence", "affected_code_evidence",
+                      "advisory_sources", "cve_ids"):
             values = component.setdefault(field, [])
             if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
                 raise ValueError(f"Task {task_id} has invalid component {field}")
@@ -109,8 +156,22 @@ def validate_worker_result(result: dict, task_id: str,
         if component.get("applicability") not in {"confirmed", "possible", "not_applicable", "unknown", None}:
             raise ValueError(f"Task {task_id} has invalid component applicability")
         if (component.get("applicability") == "confirmed" and
-                (not component["version_evidence"] or not component["advisory_sources"])):
+                (not component["version_evidence"] or not component["configuration_evidence"] or
+                 not component["affected_code_evidence"] or not component["advisory_sources"])):
             component["applicability"] = "unknown"
+    if task_id.startswith("sp_components_"):
+        supported = any(component.get("version_evidence") and
+                        component.get("configuration_evidence") and
+                        component.get("affected_code_evidence") and
+                        component.get("advisory_sources")
+                        for component in components)
+        for item in suspected:
+            if item.get("disposition") in {"static_verified", "needs_dynamic_verification"} and not supported:
+                item["disposition"] = "needs_static_research"
+                if result["status"] == "completed":
+                    result["status"] = "partial"
+                result["follow_up_needed"] = True
+                result["follow_up_reason"] = "Component claim lacks local version/configuration/affected-code and primary-source evidence"
     if not isinstance(result.get("analysis", ""), str):
         raise ValueError(f"Task {task_id} needs analysis text")
     for field in ("test_results", "test_result", "vdp_assessment",
@@ -247,6 +308,11 @@ def collect_report_candidates(completed_tasks: list[dict]) -> list[dict]:
                 candidates.append({
                     "finding_id": item.get("finding_id") or f"{task_id}-{index:03d}",
                     "source_task": task_id,
+                    "specialist_id": task.get("specialist_id"),
+                    "disposition": item.get("disposition"),
+                    "file_path": item.get("file_path") or "",
+                    "line_or_offset": item.get("line_or_offset") or "",
+                    "impact_tags": item.get("impact_tags") or [],
                     "location": item.get("location") or "위치 미기록",
                     "title": item.get("title") or "제목 미기록 의심 위치",
                     "category": item.get("category") or "추가 분류 필요",
@@ -271,10 +337,32 @@ def collect_report_candidates(completed_tasks: list[dict]) -> list[dict]:
                     "inference": "작업 전체의 근거와 개별 발견사항의 연결은 재검토가 필요합니다.",
                     "recommendation": "정확한 코드 위치와 근거를 확인하세요.",
                 })
-    return candidates
+    merged = []
+    sites = {}
+    priority = {"needs_dynamic_verification": 4, "static_verified": 3,
+                "needs_static_research": 2, "insufficient_evidence": 1}
+    for candidate in candidates:
+        if not candidate.get("specialist_id") or not candidate.get("file_path") or not candidate.get("line_or_offset"):
+            merged.append(candidate)
+            continue
+        site = (candidate["file_path"], candidate["line_or_offset"])
+        prior_index = sites.get(site)
+        if prior_index is None:
+            sites[site] = len(merged)
+            merged.append(candidate)
+            continue
+        prior = merged[prior_index]
+        for field in ("evidence", "impact_tags"):
+            candidate[field] = list(dict.fromkeys((prior.get(field) or []) + (candidate.get(field) or [])))
+        if priority.get(candidate.get("disposition"), 0) > priority.get(prior.get("disposition"), 0):
+            merged[prior_index] = candidate
+        else:
+            prior["evidence"] = candidate["evidence"]
+            prior["impact_tags"] = candidate["impact_tags"]
+    return merged
 
 
-def _report_verification(source: dict, evidence: list[str]) -> str:
+def _report_verification(source: dict, evidence: list[str], candidate: dict | None = None) -> str:
     if not evidence:
         return "근거 미기록"
     assessment = source.get("vdp_assessment")
@@ -285,6 +373,13 @@ def _report_verification(source: dict, evidence: list[str]) -> str:
         return "재현 확인"
     if test.get("executed") is True:
         return "이번 테스트 미재현"
+    disposition = (candidate or {}).get("disposition")
+    if disposition == "static_verified":
+        return "정적 근거 확인"
+    if disposition == "needs_static_research":
+        return "추가 정적 조사 필요"
+    if disposition == "insufficient_evidence":
+        return "근거 부족"
     return "재현 미실시"
 
 
@@ -345,7 +440,11 @@ def validate_report(report: dict, completed_tasks: list[dict]) -> dict:
             vulnerability["evidence"] = "; ".join(evidence)
         if vulnerability.get("severity") not in REPORT_SEVERITIES or not evidence:
             vulnerability["severity"] = "info"
-        vulnerability["verification_status"] = _report_verification(source, evidence)
+        vulnerability["verification_status"] = _report_verification(source, evidence, matched)
+        if matched:
+            vulnerability["specialist_id"] = matched.get("specialist_id")
+            vulnerability["disposition"] = matched.get("disposition")
+            vulnerability["impact_tags"] = matched.get("impact_tags") or []
         vulnerability["id"] = f"FBI-{len(accepted) + 1:03d}"
         accepted.append(vulnerability)
 
@@ -369,7 +468,10 @@ def validate_report(report: dict, completed_tasks: list[dict]) -> dict:
             "inference": candidate["inference"],
             "impact": "영향 미평가",
             "recommendation": candidate["recommendation"],
-            "verification_status": _report_verification(source, evidence),
+            "verification_status": _report_verification(source, evidence, candidate),
+            "specialist_id": candidate.get("specialist_id"),
+            "disposition": candidate.get("disposition"),
+            "impact_tags": candidate.get("impact_tags") or [],
         })
     reported_by_finding = {item.get("source_finding_id"): item for item in accepted
                            if item.get("source_finding_id")}
@@ -399,7 +501,8 @@ def validate_report(report: dict, completed_tasks: list[dict]) -> dict:
         limitations.append(f"모델 요약에서 빠진 의심 위치 {backfilled}건을 작업 기록에서 보완했습니다. 심각도는 미평가입니다.")
     if any(not candidate["evidence"] for candidate in candidates):
         limitations.append("일부 의심 위치에는 관찰 근거가 기록되지 않았습니다.")
-    unresearched = sum(bool(item.get("source_finding_id")) and not item.get("research")
+    unresearched = sum(bool(item.get("source_finding_id")) and
+                       item.get("disposition") != "static_verified" and not item.get("research")
                        for item in accepted)
     if unresearched:
         limitations.append(f"의심 위치 {unresearched}건은 위치별 심층 조사 기록이 없습니다.")

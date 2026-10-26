@@ -21,6 +21,8 @@ from coordinator.state import StateStore, file_lock, job_key
 from detective.main import run_detective
 from investigator.main import run_analysis
 from lab.main import run_lab
+from shared.redaction import collect_secret_values, redact_record
+from shared.validation import validate_specialist_scope
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -123,15 +125,6 @@ class Coordinator:
     def _on_finding(self, finding: dict, task: dict, session: Path) -> None:
         location = finding.get("location") or "unlocated"
         evidence = finding.get("evidence") or []
-        relative_location = (
-            "<extracted>" + location[len(self.extracted_dir):]
-            if self.extracted_dir and location.startswith(self.extracted_dir)
-            else location
-        )
-        identity = (relative_location if location != "unlocated" else
-                    finding.get("finding_id", task["task_id"]))
-        key = job_key(self.firmware_sha256, identity,
-                      finding.get("category", ""))
         source_files = task.get("scope_files") or []
         file_path = finding.get("file_path") or next(
             (path for path in source_files if path in location), "")
@@ -139,10 +132,32 @@ class Coordinator:
         if not line_or_offset:
             match = re.search(r"(?::|\+)(0x[0-9a-fA-F]+|\d+)(?:\b|$)", location)
             line_or_offset = match.group(1) if match else ""
+        relative_location = (
+            "<extracted>" + location[len(self.extracted_dir):]
+            if self.extracted_dir and location.startswith(self.extracted_dir)
+            else location
+        )
+        relative_file = (
+            "<extracted>" + file_path[len(self.extracted_dir):]
+            if self.extracted_dir and file_path.startswith(self.extracted_dir)
+            else file_path
+        )
+        identity = (f"{relative_file}:{line_or_offset}" if relative_file and line_or_offset
+                    else relative_location if location != "unlocated" else
+                    finding.get("finding_id", task["task_id"]))
+        key = job_key(self.firmware_sha256, identity)
+        specialist_id = task.get("specialist_id") or finding.get("specialist_id")
+        disposition = finding.get("disposition") or "needs_dynamic_verification"
         handoff = {
             "stable_id": key, "finding_id": finding["finding_id"],
             "source_task": task["task_id"], "location": location,
             "file_path": file_path, "line_or_offset": line_or_offset,
+            "specialist_id": specialist_id, "disposition": disposition,
+            "prompt_version": task.get("prompt_version"),
+            "input_path": finding.get("input_path", ""),
+            "use_path": finding.get("use_path", ""),
+            "root_cause": finding.get("root_cause", ""),
+            "impact_tags": finding.get("impact_tags") or [],
             "title": finding.get("title", ""),
             "category": finding.get("category", ""),
             "observation": finding.get("observation", ""), "evidence": evidence,
@@ -154,8 +169,59 @@ class Coordinator:
                         (["Direct observation evidence is missing"] if not evidence else []),
             "investigator_session": str(session),
         }
+        handoff = redact_record(handoff)
+        finding_key = job_key(self.firmware_sha256, specialist_id or "legacy",
+                              task["task_id"], identity)
+        self.state.enqueue("finding", finding_key, handoff)
+        self.state.finish("finding", finding_key, "complete", handoff)
+        if specialist_id and disposition != "needs_dynamic_verification":
+            return
         self.state.enqueue("detective", key, handoff)
         self._submit_detective(key, handoff)
+
+    def _run_specialist_task(self, worker, task: dict, session_id: str | None,
+                             firmware_path: str, extracted_dir: str) -> dict:
+        key, payload = self._specialist_identity(task)
+        with self.state.claim("specialist", key, payload) as lease:
+            if lease is None:
+                saved = self.state.get("specialist", key)
+                if saved and saved["status"] == "complete" and saved["result"]:
+                    return saved["result"]
+                raise RuntimeError("Specialist task is already running")
+            secret_values = (collect_secret_values(task.get("scope_files") or [])
+                             if task.get("specialist_id") == "secrets" else ())
+            result = redact_record(
+                worker.execute(task, session_id, firmware_path, extracted_dir), secret_values)
+            validate_specialist_scope(result, extracted_dir, task.get("scope_files"))
+            self.state.finish("specialist", key,
+                              "complete" if result.get("status") == "completed" else "failed",
+                              result)
+            return result
+
+    def _specialist_identity(self, task: dict) -> tuple[str, dict]:
+        specialist_id = task.get("specialist_id")
+        scope_file = (task.get("scope_files") or [""])[0]
+        key = job_key(self.firmware_sha256, specialist_id or "unknown",
+                      scope_file, task.get("prompt_version") or "", task["task_id"])
+        payload = {"task_id": task["task_id"], "specialist_id": specialist_id,
+                   "file_path": scope_file, "prompt_version": task.get("prompt_version")}
+        return key, payload
+
+    def _reconcile_specialist_task(self, task: dict, result: dict) -> dict:
+        key, payload = self._specialist_identity(task)
+        secret_values = (collect_secret_values(task.get("scope_files") or [])
+                         if task.get("specialist_id") == "secrets" else ())
+        safe_result = redact_record(result, secret_values)
+        if self.extracted_dir:
+            validate_specialist_scope(safe_result, self.extracted_dir,
+                                      task.get("scope_files"))
+        with self.state.claim("specialist", key, payload) as lease:
+            if lease is None:
+                return safe_result
+            self.state.finish("specialist", key,
+                              "complete" if safe_result.get("status") == "completed" else "failed",
+                              safe_result)
+        return safe_result
 
     def _submit_detective(self, key: str, handoff: dict) -> None:
         with self._mutex:
@@ -327,8 +393,11 @@ class Coordinator:
                                  {"firmware": str(self.firmware), "resume": resume})
                 try:
                     run_analysis(str(self.firmware), settings, resume_from=resume,
-                                 all_files=True, on_finding=self._on_finding,
-                                 on_extracted=self._on_extracted)
+                                 all_files=True, specialists=True,
+                                 on_finding=self._on_finding,
+                                 on_extracted=self._on_extracted,
+                                 task_runner=self._run_specialist_task,
+                                 task_reconcile=self._reconcile_specialist_task)
                     if self.investigator_session:
                         research_path = Path(self.investigator_session) / "research_status.json"
                         if research_path.exists():

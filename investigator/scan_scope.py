@@ -108,8 +108,8 @@ def scan_tasks(extracted_dir: str | Path, files_per_task: int = 4,
 
 
 def save_scan_scope(session_dir: str | Path, tasks: list[dict], targets: list[str],
-                    inventory: list[dict] | None = None) -> None:
+                    inventory: list[dict] | None = None, **extras) -> None:
     path = Path(session_dir) / "scan_scope.json"
     path.write_text(json.dumps({"targets": targets, "tasks": tasks,
-                                "inventory": inventory or []},
+                                "inventory": inventory or [], **extras},
                                ensure_ascii=False, indent=2), encoding="utf-8")

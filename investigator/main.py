@@ -25,12 +25,14 @@ from investigator.deep_research import baseline_tasks, finding_research_tasks
 from investigator.orchestrator import Orchestrator
 from investigator.patch_differ import PatchDiffer
 from investigator.scan_scope import file_inventory, save_scan_scope, scan_tasks
+from investigator.specialists import followup_tasks, plan_specialists
 from investigator.worker import Worker
 from shared.logger import ConversationLogger
 from shared.mcp_manager import McpManager
 from shared.session_manager import SessionManager
 from shared.resume import (load_completed_tasks, load_sent_task_ids,
                            verify_resume_firmware)
+from shared.validation import validate_specialist_scope
 
 
 def load_settings(path: str) -> dict:
@@ -98,7 +100,7 @@ def load_resume_state(session_dir: str) -> tuple[list, dict | None, int, str | N
 
 
 def _dispatch_tasks(new_tasks, worker, session_mgr, firmware_path, extracted_dir, logger,
-                    parallel_limit, cfg_worker, on_finding=None) -> list[dict]:
+                    parallel_limit, cfg_worker, on_finding=None, task_runner=None) -> list[dict]:
     """new_tasks를 Codex 워커에 병렬 전송하고 completed 형태로 반환."""
     task_results: dict[str, dict] = {}
 
@@ -108,8 +110,10 @@ def _dispatch_tasks(new_tasks, worker, session_mgr, firmware_path, extracted_dir
             existing_sid = session_mgr.get_session_id(
                 task["task_id"], task.get("reuse_session_for")
             )
-            fut = executor.submit(worker.execute, task, existing_sid, firmware_path,
-                                  extracted_dir)
+            runner = task_runner or (lambda w, t, sid, fw, root:
+                                     w.execute(t, sid, fw, root))
+            fut = executor.submit(runner, worker, task, existing_sid,
+                                  firmware_path, extracted_dir)
             futures[fut] = task
 
         for fut in as_completed(futures):
@@ -117,6 +121,8 @@ def _dispatch_tasks(new_tasks, worker, session_mgr, firmware_path, extracted_dir
             task_id = task["task_id"]
             try:
                 result = fut.result()
+                if task.get("specialist_id"):
+                    validate_specialist_scope(result, extracted_dir)
                 scoped_files = task.get("scope_files") or []
                 if scoped_files:
                     reviewed = set(result.get("reviewed_files") or [])
@@ -168,6 +174,9 @@ def _dispatch_tasks(new_tasks, worker, session_mgr, firmware_path, extracted_dir
             newly_completed.append({
                 "task_id": tid,
                 "type": task.get("type"),
+                "specialist_id": task.get("specialist_id"),
+                "prompt_version": task.get("prompt_version"),
+                "scope_files": task.get("scope_files") or [],
                 "session_id": task_results[tid].get("session_id"),
                 "result": task_results[tid],
             })
@@ -176,7 +185,8 @@ def _dispatch_tasks(new_tasks, worker, session_mgr, firmware_path, extracted_dir
 
 def run_analysis(firmware_path: str, settings: dict, resume_from: str | None = None,
                  patched_firmware_path: str | None = None, *,
-                 all_files: bool = False, on_finding=None, on_extracted=None):
+                 all_files: bool = False, on_finding=None, on_extracted=None,
+                 specialists: bool = False, task_runner=None, task_reconcile=None):
     firmware_path = str(Path(firmware_path).resolve())
     if patched_firmware_path:
         patched_firmware_path = str(Path(patched_firmware_path).resolve())
@@ -294,32 +304,78 @@ def run_analysis(firmware_path: str, settings: dict, resume_from: str | None = N
         resume_session_id=resume_orchestrator_sid,
         sent_task_ids=load_sent_task_ids(resume_from) if resume_from else None,
     )
-    worker = Worker(
-        model=cfg_worker["model"],
-        reasoning_effort=cfg_worker.get("reasoning_effort", "high"),
-        bypass_approvals=cfg_worker.get("bypass_approvals", False),
-        sandbox_permissions=cfg_worker.get("sandbox_permissions", []),
-        network_access=cfg_worker.get("network_access", False),
-        sandbox=cfg_worker.get("sandbox", "read-only"),
-        logger=logger,
-    )
+    def new_worker() -> Worker:
+        return Worker(
+            model=cfg_worker["model"],
+            reasoning_effort=cfg_worker.get("reasoning_effort", "high"),
+            bypass_approvals=cfg_worker.get("bypass_approvals", False),
+            sandbox_permissions=cfg_worker.get("sandbox_permissions", []),
+            network_access=cfg_worker.get("network_access", False),
+            sandbox=cfg_worker.get("sandbox", "read-only"),
+            logger=logger,
+        )
+    worker = new_worker()
     (logger.get_session_path() / "research_artifacts").mkdir(exist_ok=True)
     session_mgr = SessionManager()
     session_mgr.restore(completed_tasks)
 
-    sweep_tasks, code_files = scan_tasks(
-        extracted_dir, files_per_task=(1 if all_files else cfg_analysis.get("scan_files_per_task", 4)),
-        all_files=all_files,
-    )
+    inventory = file_inventory(extracted_dir)
+    scope_extras = {}
+    if specialists:
+        sweep_tasks, scope_extras = plan_specialists(inventory, extracted_dir)
+        code_files = [entry["path"] for entry in inventory if entry["status"] == "pending"]
+    else:
+        sweep_tasks, code_files = scan_tasks(
+            extracted_dir, files_per_task=(1 if all_files else cfg_analysis.get("scan_files_per_task", 4)),
+            all_files=all_files,
+        )
+    specialist_workers = ({identifier: new_worker() for identifier in {
+        task["specialist_id"] for task in sweep_tasks}}
+        if specialists else {})
+
+    def selected_runner(default_worker, task, session_id, firmware, extracted):
+        assigned = specialist_workers.get(task.get("specialist_id"), default_worker)
+        if task_runner:
+            return task_runner(assigned, task, session_id, firmware, extracted)
+        return assigned.execute(task, session_id, firmware, extracted)
     scope_path = logger.get_session_path() / "scan_scope.json"
     if resume_from and scope_path.exists():
         previous_scope = json.loads(scope_path.read_text(encoding="utf-8"))
         if previous_scope.get("targets") != code_files:
             raise ExtractionError("extracted code files changed since the saved scan scope")
+        if specialists:
+            save_scan_scope(logger.get_session_path(), sweep_tasks, code_files,
+                            inventory=inventory, **scope_extras)
     else:
         save_scan_scope(logger.get_session_path(), sweep_tasks, code_files,
-                        inventory=file_inventory(extracted_dir))
+                        inventory=inventory, **scope_extras)
+    if specialists and resume_from:
+        planned = {task["task_id"]: task for task in sweep_tasks}
+        planned.update({task["task_id"]: task for task in followup_tasks(completed_tasks)})
+        for saved in completed_tasks:
+            task = planned.get(saved.get("task_id"))
+            if task is None:
+                continue
+            missing_task_log = not saved.get("type")
+            for field in ("type", "specialist_id", "prompt_version", "scope_files"):
+                saved[field] = task.get(field)
+            result = saved.get("result") or {}
+            result["specialist_id"] = task["specialist_id"]
+            result["prompt_version"] = task["prompt_version"]
+            if task_reconcile and result.get("status") == "completed":
+                result = task_reconcile(task, result) or result
+                saved["result"] = result
+            if missing_task_log:
+                logger.log_task_result(task, result)
     goal_prompt = logger.get_session_path() / "GOAL_PROMPT.txt"
+    specialist_goal = (
+        "Use the fixed specialist catalog and file routing in scan_scope.json. "
+        "A no_applicable_clue routing decision is a local heuristic, not proof that a file is safe. "
+        "Use task_results.jsonl and research_status.json to identify unfinished specialist "
+        "work; preserve each finding's disposition and separate static evidence from "
+        "executed verification. Do not repeat completed specialist jobs. "
+        if specialists else ""
+    )
     goal_network_rule = (
         "Consult primary vendor or project sources when useful, but never upload firmware "
         "or extracted content. " if cfg_worker.get("network_access", False) else
@@ -335,6 +391,7 @@ def run_analysis(firmware_path: str, settings: dict, resume_from: str | None = N
         "prioritized Detective handoff to research_artifacts/detective_handoff.md. "
         "For each handoff candidate include the exact code location, observed evidence, "
         "reachability conditions, counterevidence, and the next safe verification. "
+        f"{specialist_goal}"
         "Cite exact local files and offsets; distinguish static "
         "evidence from executed verification. Keep original firmware and extracted files "
         f"unchanged. {goal_network_rule}"
@@ -344,14 +401,18 @@ def run_analysis(firmware_path: str, settings: dict, resume_from: str | None = N
     )
     print(f"[*] Interactive Codex /goal prompt: {goal_prompt}")
     completed_ids = {task.get("task_id") for task in completed_tasks
-                     if (task.get("result") or {}).get("status") != "failed"}
+                     if ((task.get("result") or {}).get("status") == "completed"
+                         if specialists else
+                         (task.get("result") or {}).get("status") != "failed")}
     if on_finding:
         for saved in completed_tasks:
+            if specialists and saved.get("type") not in {"specialist_analysis", "specialist_followup"}:
+                continue
             for finding in (saved.get("result") or {}).get("suspected_findings") or []:
                 on_finding(finding, saved, logger.get_session_path())
     pending_sweep = [task for task in sweep_tasks
                      if task["task_id"] not in completed_ids]
-    scope_label = "Extracted files" if all_files else "Code files"
+    scope_label = "Extracted files" if all_files or specialists else "Code files"
     print(f"[*] {scope_label} in scan scope: {len(code_files)}; "
           f"pending review tasks: {len(pending_sweep)}")
     def budget_available() -> bool:
@@ -366,13 +427,22 @@ def run_analysis(firmware_path: str, settings: dict, resume_from: str | None = N
             completed_tasks.extend(_dispatch_tasks(
                 batch, worker, session_mgr, firmware_path, extracted_dir, logger,
                 parallel_limit, cfg_worker, on_finding,
+                selected_runner if specialists else task_runner,
             ))
 
-    dispatch_stage(pending_sweep, "Code Review Sweep")
+    dispatch_stage(pending_sweep, "Specialist Review" if specialists else "Code Review Sweep")
+
+    if specialists and budget_available():
+        completed_ids = {task.get("task_id") for task in completed_tasks
+                         if (task.get("result") or {}).get("status") == "completed"}
+        latest_tasks = list({task.get("task_id"): task for task in completed_tasks}.values())
+        pending_followups = [task for task in followup_tasks(latest_tasks)
+                             if task["task_id"] not in completed_ids]
+        dispatch_stage(pending_followups, "Specialist Static Follow-up")
 
     pending_baseline = []
     pending_finding_research = []
-    if cfg_analysis.get("deep_research_enabled", True):
+    if not specialists and cfg_analysis.get("deep_research_enabled", True):
         completed_ids = {task.get("task_id") for task in completed_tasks
                          if (task.get("result") or {}).get("status") != "failed"}
         pending_baseline = [task for task in baseline_tasks()
@@ -384,8 +454,8 @@ def run_analysis(firmware_path: str, settings: dict, resume_from: str | None = N
                                     if task["task_id"] not in completed_ids]
         dispatch_stage(pending_finding_research, "Finding Research")
 
-    stop_reason = "iteration_limit"
-    while iteration < max_iterations and budget_available():
+    stop_reason = "specialist_sweep_complete" if specialists else "iteration_limit"
+    while not specialists and iteration < max_iterations and budget_available():
         iteration += 1
 
         if first_roadmap is not None:
@@ -440,11 +510,18 @@ def run_analysis(firmware_path: str, settings: dict, resume_from: str | None = N
         stop_reason = "time_budget_reached"
         print("[*] Research time budget reached; remaining work is recorded for resume")
 
+    latest_tasks = list({task.get("task_id"): task for task in completed_tasks}.values())
+    if specialists and stop_reason == "specialist_sweep_complete" and any(
+            (task.get("result") or {}).get("status") in {"partial", "failed"}
+            for task in latest_tasks if task.get("type", "").startswith("specialist_")):
+        stop_reason = "specialist_incomplete"
+
     stage_ids = {task.get("task_id") for task in completed_tasks}
     all_finding_tasks = (finding_research_tasks(completed_tasks)
                          if cfg_analysis.get("deep_research_enabled", True) else [])
     research_status = {
-        "scan_scope_kind": "all_files" if all_files else "code_files",
+        "scan_scope_kind": "specialists" if specialists else
+                           ("all_files" if all_files else "code_files"),
         "started_at": started_at.isoformat(),
         "finished_at": datetime.now(timezone.utc).isoformat(),
         "requested_minutes": research_minutes,
@@ -453,6 +530,12 @@ def run_analysis(firmware_path: str, settings: dict, resume_from: str | None = N
         "code_tasks_recorded": sum(task["task_id"] in stage_ids for task in sweep_tasks),
         "code_tasks_total": len(sweep_tasks),
         "file_tasks_total": len(sweep_tasks) if all_files else None,
+        "specialist_tasks_total": len(sweep_tasks) if specialists else None,
+        "specialist_tasks_recorded": sum(task["task_id"] in stage_ids for task in sweep_tasks)
+        if specialists else None,
+        "no_applicable_clue_files": sum(
+            item.get("status") == "no_applicable_clue"
+            for item in scope_extras.get("file_routing", [])) if specialists else None,
         "baseline_tasks_recorded": sum(task["task_id"] in stage_ids for task in baseline_tasks())
         if cfg_analysis.get("deep_research_enabled", True) else 0,
         "finding_tasks_recorded": sum(task["task_id"] in stage_ids for task in all_finding_tasks),

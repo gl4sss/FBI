@@ -46,6 +46,9 @@ class ConversationLogger:
             "timestamp": datetime.now().isoformat(),
             "task_id": task["task_id"],
             "type": task.get("type"),
+            "specialist_id": task.get("specialist_id"),
+            "prompt_version": task.get("prompt_version"),
+            "scope_files": task.get("scope_files") or [],
             "session_id": result.get("session_id"),
             "result": result,
         })

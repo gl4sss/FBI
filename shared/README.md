@@ -12,7 +12,8 @@ flowchart LR
     PROMPT --> CODEX["codex_client.py<br/>Codex CLI 호출·응답 수집"]
     WORK --> CODEX
     CODEX --> CHECK["validation.py<br/>작업·결과 구조 검증"]
-    CHECK --> LOG["logger.py<br/>JSONL·로드맵 저장"]
+    CHECK --> REDACT["redaction.py<br/>자격증명 값 가림"]
+    REDACT --> LOG["logger.py<br/>JSONL·로드맵 저장"]
     MAIN --> SESS["session_manager.py<br/>작업별 Codex 세션 추적"]
     SESS --> CODEX
     LOG --> RESUME["resume.py<br/>저장 결과 복원·펌웨어 확인"]
@@ -24,6 +25,7 @@ flowchart LR
 
 - `codex_client.py`: Codex CLI 실행과 세션 ID 추출
 - `validation.py`: 작업 계획 및 워커 결과 검증
+- `redaction.py`: 일반적인 자격증명 값과 개인키 블록을 저장·보고 전에 가림
 - `resume.py`: 저장된 작업 결과 복원
 - `prompting.py`: 펌웨어·세션 자료의 입력 경계 표시
 - `logger.py`: 오케스트레이터 및 워커 대화 기록
