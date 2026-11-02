@@ -381,31 +381,13 @@ def _run_detective(investigator_session: str, settings: dict,
     logger = ConversationLogger(sessions_dir, firmware_name)
     session_path = logger.get_session_path()
 
-    # QEMU 시작
-    qemu_info: dict = {"started": False, "reason": "skipped by --no-qemu"}
+    # Start QEMU only after the plan includes a runtime test.
+    qemu_info: dict = {"started": False, "reason": (
+        "skipped by --no-qemu" if no_qemu else "waiting for a runtime test")}
     qemu_runner: QemuRunner | None = None
-
-    if not no_qemu and firmware_path != "unknown":
-        _bar("QEMU 에뮬레이터 시작")
-        qemu_runner = QemuRunner(cfg_qemu)
-        work_dir = str(session_path / "qemu")
-        qemu_info = qemu_runner.start(firmware_path, firmware_info, work_dir)
-
-        if qemu_info["started"]:
-            print(f"[QEMU] 시작 성공 (PID={qemu_info['pid']}, arch={qemu_info['arch']})")
-            print(f"[QEMU] {qemu_info['connection_info']}")
-        else:
-            print(f"[QEMU] 시작 실패: {qemu_info.get('reason')}")
-            print(f"[QEMU] 정적 분석 기반 PoC + 트리거 가이드 작성 모드로 진행")
-    else:
-        print(f"[QEMU] 건너뜀 — trigger_guide는 QEMU 설정 방법도 포함하여 작성됩니다.")
-
+    print("[QEMU] 실행 테스트가 계획될 때 시작합니다." if not no_qemu else
+          "[QEMU] 건너뜀 — trigger_guide는 QEMU 설정 방법도 포함하여 작성됩니다.")
     lab_info = {}
-    if lab_request and not no_qemu and not qemu_info.get("started"):
-        if release_qemu_lock:
-            release_qemu_lock()
-        lab_info = lab_request(firmware_path, firmware_info) or {}
-        qemu_info["lab"] = lab_info
 
     # MCP 설정
     cfg_mcp = settings.get("mcp", {})
@@ -456,6 +438,7 @@ def _run_detective(investigator_session: str, settings: dict,
         "vulnerabilities": vulnerabilities,
         "qemu": {
             "available": qemu_info.get("started", False),
+            "on_demand": not no_qemu and firmware_path != "unknown",
             "arch": qemu_info.get("arch"),
             "connection_info": qemu_info.get("connection_info"),
         },
@@ -490,7 +473,11 @@ def _run_detective(investigator_session: str, settings: dict,
             logger.save_roadmap(roadmap)
             last_roadmap = roadmap
 
-            if roadmap.get("lab_required") is True and lab_request and not no_qemu and not lab_info:
+            planned_runtime_test = any(
+                task.get("type") == "poc_testing"
+                for task in roadmap.get("new_tasks") or [])
+            if (planned_runtime_test and roadmap.get("lab_required") is True
+                    and lab_request and not no_qemu and not lab_info):
                 if qemu_runner:
                     qemu_runner.stop()
                     qemu_runner = None
@@ -499,6 +486,7 @@ def _run_detective(investigator_session: str, settings: dict,
                 qemu_info = {"started": False, "reason": "Lab environment requested by Detective"}
                 lab_info = lab_request(firmware_path, firmware_info) or {}
                 qemu_info["lab"] = lab_info
+                context["lab"] = lab_info
                 completed_tasks.append({
                     "task_id": f"lab_context_{iteration}", "type": "lab_environment",
                     "result": {"status": "completed", "environment": lab_info,
@@ -553,6 +541,30 @@ def _run_detective(investigator_session: str, settings: dict,
             if not new_tasks:
                 print("[!] Codex returned no new tasks. Stopping.")
                 break
+
+            if (any(task.get("type") == "poc_testing" for task in new_tasks)
+                    and not no_qemu and firmware_path != "unknown"
+                    and not lab_info and qemu_runner is None):
+                _bar("QEMU 에뮬레이터 시작")
+                qemu_runner = QemuRunner(cfg_qemu)
+                qemu_info = qemu_runner.start(
+                    firmware_path, firmware_info, str(session_path / "qemu"))
+                if qemu_info.get("started"):
+                    print(f"[QEMU] 시작 성공 (PID={qemu_info['pid']}, arch={qemu_info['arch']})")
+                    print(f"[QEMU] {qemu_info['connection_info']}")
+                else:
+                    print(f"[QEMU] 시작 실패: {qemu_info.get('reason')}")
+                    if lab_request:
+                        if release_qemu_lock:
+                            release_qemu_lock()
+                        lab_info = lab_request(firmware_path, firmware_info) or {}
+                        qemu_info["lab"] = lab_info
+                        context["lab"] = lab_info
+                context["qemu"] = {
+                    "available": qemu_info.get("started", False),
+                    "on_demand": True, "arch": qemu_info.get("arch"),
+                    "connection_info": qemu_info.get("connection_info"),
+                }
 
             print(f"\n[Orchestrator] Tasks ({len(new_tasks)}):")
             for t in new_tasks:

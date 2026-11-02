@@ -14,7 +14,7 @@ import os
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -34,6 +34,7 @@ from shared.session_manager import SessionManager
 from shared.resume import (load_completed_tasks, load_sent_task_ids,
                            verify_resume_firmware)
 from shared.validation import validate_specialist_scope
+from shared.external_tools import available_for_target, load_catalog
 from shared.version import VERSION
 
 
@@ -102,7 +103,8 @@ def load_resume_state(session_dir: str) -> tuple[list, dict | None, int, str | N
 
 
 def _dispatch_tasks(new_tasks, worker, session_mgr, firmware_path, extracted_dir, logger,
-                    parallel_limit, cfg_worker, on_finding=None, task_runner=None) -> list[dict]:
+                    parallel_limit, cfg_worker, on_finding=None, task_runner=None,
+                    deadline=None) -> list[dict]:
     """new_tasks를 Codex 워커에 병렬 전송하고 completed 형태로 반환."""
     task_results: dict[str, dict] = {}
     session_locks: dict[str, threading.Lock] = {}
@@ -117,65 +119,78 @@ def _dispatch_tasks(new_tasks, worker, session_mgr, firmware_path, extracted_dir
 
     with ThreadPoolExecutor(max_workers=parallel_limit) as executor:
         futures: dict = {}
-        for task in new_tasks:
-            existing_sid = session_mgr.get_session_id(
-                task["task_id"], task.get("reuse_session_for")
-            )
-            if existing_sid:
-                session_locks.setdefault(existing_sid, threading.Lock())
-            fut = executor.submit(run_one, task, existing_sid)
-            futures[fut] = task
+        remaining = iter(new_tasks)
 
-        for fut in as_completed(futures):
-            task = futures[fut]
-            task_id = task["task_id"]
-            try:
-                result = fut.result()
-                if task.get("specialist_id"):
-                    validate_specialist_scope(result, extracted_dir)
-                scoped_files = task.get("scope_files") or []
-                if scoped_files:
-                    reviewed = set(result.get("reviewed_files") or [])
-                    missing = [path for path in scoped_files if path not in reviewed]
-                    if missing:
-                        if result.get("status") == "completed":
-                            result["status"] = "partial"
-                        result["follow_up_needed"] = True
-                        result["follow_up_reason"] = (
-                            f"Scoped files not reviewed: {', '.join(missing)}"
-                        )
-                sid = result.get("session_id") or f"unknown_{task_id}"
-                session_mgr.register_session(task_id, sid, task.get("type", ""))
-                task_results[task_id] = result
+        def fill_slots():
+            while len(futures) < parallel_limit:
+                if deadline is not None and time.monotonic() >= deadline:
+                    return
+                try:
+                    task = next(remaining)
+                except StopIteration:
+                    return
+                existing_sid = session_mgr.get_session_id(
+                    task["task_id"], task.get("reuse_session_for")
+                )
+                if existing_sid:
+                    session_locks.setdefault(existing_sid, threading.Lock())
+                fut = executor.submit(run_one, task, existing_sid)
+                futures[fut] = task
 
-                status_str = result.get("status", "?")
-                findings = result.get("findings") or []
-                suspected = result.get("suspected_findings") or []
-                short_sid = sid[:8] if len(sid) >= 8 else sid
-                print(f"\n[Codex] {task_id}  status={status_str}  session={short_sid}...")
-                if findings:
-                    print(f"        Findings ({len(findings)}):")
-                    for item in findings[:4]:
-                        print(f"          - {str(item)[:120]}")
-                if suspected:
-                    print(f"        Suspicious sites: {len(suspected)}")
-                analysis_short = (result.get("analysis") or "")[:200]
-                if analysis_short:
-                    print(f"        Analysis: {analysis_short}...")
+        fill_slots()
+        while futures:
+            finished, _ = wait(futures, return_when=FIRST_COMPLETED)
+            for fut in finished:
+                task = futures.pop(fut)
+                task_id = task["task_id"]
+                try:
+                    result = fut.result()
+                    if task.get("specialist_id"):
+                        validate_specialist_scope(result, extracted_dir)
+                    scoped_files = task.get("scope_files") or []
+                    if scoped_files:
+                        reviewed = set(result.get("reviewed_files") or [])
+                        missing = [path for path in scoped_files if path not in reviewed]
+                        if missing:
+                            if result.get("status") == "completed":
+                                result["status"] = "partial"
+                            result["follow_up_needed"] = True
+                            result["follow_up_reason"] = (
+                                f"Scoped files not reviewed: {', '.join(missing)}"
+                            )
+                    sid = result.get("session_id") or f"unknown_{task_id}"
+                    session_mgr.register_session(task_id, sid, task.get("type", ""))
+                    task_results[task_id] = result
 
-            except Exception as exc:
-                print(f"[!] Task {task_id} failed: {exc}")
-                task_results[task_id] = {
-                    "task_id": task_id,
-                    "status": "failed",
-                    "findings": [],
-                    "analysis": str(exc),
-                    "session_id": None,
-                }
-            logger.log_task_result(task, task_results[task_id])
-            if on_finding and task_results[task_id].get("status") != "failed":
-                for finding in task_results[task_id].get("suspected_findings") or []:
-                    on_finding(finding, task, logger.get_session_path())
+                    status_str = result.get("status", "?")
+                    findings = result.get("findings") or []
+                    suspected = result.get("suspected_findings") or []
+                    short_sid = sid[:8] if len(sid) >= 8 else sid
+                    print(f"\n[Codex] {task_id}  status={status_str}  session={short_sid}...")
+                    if findings:
+                        print(f"        Findings ({len(findings)}):")
+                        for item in findings[:4]:
+                            print(f"          - {str(item)[:120]}")
+                    if suspected:
+                        print(f"        Suspicious sites: {len(suspected)}")
+                    analysis_short = (result.get("analysis") or "")[:200]
+                    if analysis_short:
+                        print(f"        Analysis: {analysis_short}...")
+
+                except Exception as exc:
+                    print(f"[!] Task {task_id} failed: {exc}")
+                    task_results[task_id] = {
+                        "task_id": task_id,
+                        "status": "failed",
+                        "findings": [],
+                        "analysis": str(exc),
+                        "session_id": None,
+                    }
+                logger.log_task_result(task, task_results[task_id])
+                if on_finding and task_results[task_id].get("status") != "failed":
+                    for finding in task_results[task_id].get("suspected_findings") or []:
+                        on_finding(finding, task, logger.get_session_path())
+            fill_slots()
 
     newly_completed = []
     for task in new_tasks:
@@ -218,6 +233,11 @@ def run_analysis(firmware_path: str, settings: dict, resume_from: str | None = N
 
     firmware_name = Path(firmware_path).stem
     logger = ConversationLogger(sessions_dir, firmware_name, resume_from=resume_from)
+    catalog = load_catalog()
+    tool_inventory = {target: available_for_target(target, catalog)
+                      for target in catalog["targets"]}
+    (logger.get_session_path() / "tool_inventory.json").write_text(
+        json.dumps(tool_inventory, ensure_ascii=False, indent=2), encoding="utf-8")
 
     _bar(f"Firmware Analysis: {firmware_path}")
 
@@ -447,19 +467,19 @@ def run_analysis(firmware_path: str, settings: dict, resume_from: str | None = N
             if stage_limit is not None:
                 allowed = min(allowed, stage_limit)
             tasks = tasks[:allowed]
-        for start in range(0, len(tasks), parallel_limit):
-            if not budget_available():
-                return
-            batch = tasks[start:start + parallel_limit]
-            _bar(f"{label}  |  tasks {start + 1}-{start + len(batch)}")
-            completed_tasks.extend(_dispatch_tasks(
-                batch, worker, session_mgr, firmware_path, extracted_dir, logger,
-                parallel_limit, cfg_worker, on_finding,
-                selected_runner if specialists else task_runner,
-            ))
-            if specialists:
-                specialist_dispatched += len(batch)
-                attempted_this_run.update(task["task_id"] for task in batch)
+        if not tasks or not budget_available():
+            return
+        _bar(f"{label}  |  up to {len(tasks)} tasks")
+        dispatched = _dispatch_tasks(
+            tasks, worker, session_mgr, firmware_path, extracted_dir, logger,
+            parallel_limit, cfg_worker, on_finding,
+            selected_runner if specialists else task_runner,
+            deadline=deadline,
+        )
+        completed_tasks.extend(dispatched)
+        if specialists:
+            specialist_dispatched += len(dispatched)
+            attempted_this_run.update(task["task_id"] for task in dispatched)
 
     if specialists and completed_tasks and specialist_task_limit:
         saved_followups = [task for task in followup_tasks(completed_tasks)

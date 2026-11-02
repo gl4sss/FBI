@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import json
+import re
 import sqlite3
 import sys
 import webbrowser
@@ -15,6 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from investigator.specialists import SPECIALISTS
+from shared.redaction import redact_text
 from shared.version import VERSION
 
 
@@ -50,26 +52,88 @@ def _read_jobs(database: Path) -> list[dict]:
         with sqlite3.connect(f"{database.resolve().as_uri()}?mode=ro", uri=True,
                              timeout=2) as connection:
             rows = connection.execute(
-                "SELECT kind,key,status,payload,attempts,updated_at FROM jobs"
+                "SELECT kind,key,status,payload,result,attempts,updated_at FROM jobs"
             ).fetchall()
     except (OSError, sqlite3.Error):
         return []
     jobs = []
-    for kind, key, status, raw_payload, attempts, updated_at in rows:
+    for kind, key, status, raw_payload, raw_result, attempts, updated_at in rows:
         if kind not in JOB_KINDS:
             continue
         try:
             payload = json.loads(raw_payload)
         except (TypeError, ValueError):
             payload = {}
+        try:
+            result = json.loads(raw_result) if kind in {"finding", "detective"} else None
+        except (TypeError, ValueError):
+            result = None
         jobs.append({"kind": kind, "key": key, "status": status,
                      "payload": payload if isinstance(payload, dict) else {},
+                     "result": result if isinstance(result, dict) else {},
                      "attempts": attempts, "updated_at": updated_at})
     return jobs
 
 
+def _public_label(value: object, fallback: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        return fallback
+    # Titles are model output. Keep credentials and absolute paths out of the browser.
+    cleaned = redact_text(value.strip())
+    cleaned = re.sub(r"(?<!\w)/(?:[^\s:/]+/)*[^\s:/]+", "[path]", cleaned)
+    return cleaned[:160]
+
+
+def _confirmed_vulnerabilities(jobs: list[dict]) -> tuple[int, list[dict]]:
+    findings = {}
+    for job in jobs:
+        if job["kind"] != "finding" or job["status"] != "complete":
+            continue
+        finding = job["result"]
+        if finding.get("disposition") != "static_verified":
+            continue
+        identifier = finding.get("stable_id") or job["key"]
+        findings[(identifier, "static")] = {
+            "id": str(identifier)[:12], "verification": "static",
+            "title": _public_label(finding.get("title"), "제목 미기록"),
+            "category": _public_label(finding.get("category"), "종류 미기록"),
+            "file": Path(finding.get("file_path") or "").name,
+            "line": _public_label(finding.get("line_or_offset"), ""),
+            "cvss_score": None, "updated_at": job["updated_at"],
+        }
+    for job in jobs:
+        if job["kind"] != "detective" or job["status"] != "complete":
+            continue
+        payload, result = job["payload"], job["result"]
+        claims = result.get("confirmed_vulns") or []
+        if not isinstance(claims, list):
+            continue
+        for claim in claims:
+            if not isinstance(claim, dict) or claim.get("trigger_confirmed") is not True:
+                continue
+            score = claim.get("cvss_score")
+            score = float(score) if isinstance(score, (int, float)) and 0 <= score <= 10 else None
+            identifier = payload.get("stable_id") or job["key"]
+            findings.pop((identifier, "static"), None)
+            findings[(identifier, str(claim.get("vuln_id") or ""))] = {
+                "id": f"{str(identifier)[:12]}-{_public_label(claim.get('vuln_id'), 'finding')}",
+                "verification": "dynamic",
+                "title": _public_label(claim.get("title"), _public_label(payload.get("title"), "제목 미기록")),
+                "category": _public_label(payload.get("category"), "종류 미기록"),
+                "file": Path(payload.get("file_path") or "").name,
+                "line": _public_label(payload.get("line_or_offset"), ""),
+                "cvss_score": score, "updated_at": job["updated_at"],
+            }
+    ordered = sorted(findings.values(), key=lambda item: (
+        item["cvss_score"] is None, -(item["cvss_score"] or 0),
+        item["verification"] != "dynamic", -item["updated_at"]))
+    for item in ordered:
+        item.pop("updated_at")
+    return len(ordered), ordered[:100]
+
+
 def read_snapshot(state_dir: str | Path) -> dict:
-    """Return only status metadata; no evidence, prompts, or secret values."""
+    """Return status and safe finding labels; no evidence, prompts, or secret values."""
     directory = Path(state_dir)
     jobs = _read_jobs(directory / "jobs.sqlite3")
     manifest = _read_json(directory / "coordinator.json")
@@ -146,6 +210,7 @@ def read_snapshot(state_dir: str | Path) -> dict:
         counts = Counter(job["status"] for job in jobs if job["kind"] == kind)
         stages[kind] = dict(counts)
     investigator = next((job for job in jobs if job["kind"] == "investigator"), None)
+    confirmed_count, confirmed = _confirmed_vulnerabilities(jobs)
     return {
         "firmware_id": directory.name[:12],
         "observed_at": datetime.now(timezone.utc).isoformat(),
@@ -153,6 +218,7 @@ def read_snapshot(state_dir: str | Path) -> dict:
         "extraction_ready": bool(manifest.get("extracted_dir")),
         "investigator_status": investigator["status"] if investigator else "waiting",
         "specialists": specialists, "detectives": detectives,
+        "confirmed_count": confirmed_count, "confirmed_vulnerabilities": confirmed,
         "lab": [{"id": job["key"][:12], "status": job["status"]}
                 for job in jobs if job["kind"] == "lab"],
         "assistant": [{"id": job["key"][:12], "status": job["status"]}

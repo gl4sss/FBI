@@ -8,6 +8,7 @@ from shared.logger import ConversationLogger
 from shared.codex_client import run_codex
 from shared.validation import validate_worker_result
 from shared.redaction import collect_secret_values, redact_record
+from shared.external_tools import guidance_for_files
 
 WORKER_OUTPUT_SCHEMA = """
 Return ONLY a valid JSON object — no markdown, no text outside JSON:
@@ -35,6 +36,7 @@ Return ONLY a valid JSON object — no markdown, no text outside JSON:
       "entry_conditions": ["conditions needed to reach this site"],
       "counterevidence": ["observed guards or alternative explanation"],
       "unknowns": ["conditions that still need verification"],
+      "dynamic_test_question": "Specific runtime question that static analysis cannot answer, or empty string",
       "recommendation": "Focused verification or remediation"
     }
   ],
@@ -138,7 +140,9 @@ class Worker:
             f"For specialist tasks, assign exactly one disposition to each finding. "
             f"Static verification confirms only the observed code or configuration weakness, "
             f"never a runtime trigger. Ask for dynamic verification only when a controlled "
-            f"execution would answer a concrete unresolved question. Do not copy secret values "
+            f"execution would answer a concrete unresolved question that static artifacts cannot settle. "
+            f"Write that question in dynamic_test_question and explain the static limit in unknowns. "
+            f"Leave dynamic_test_question empty for all other dispositions. Do not copy secret values "
             f"into the response; identify their file/offset and use path instead. "
             f"For each finding, cite a file, offset, command output, or artifact in evidence. "
             f"Put unverified explanations in inferences. If the target or tool is unavailable, "
@@ -148,6 +152,8 @@ class Worker:
             f"RESEARCH ARTIFACTS: {(self.logger.get_session_path() / 'research_artifacts').resolve() if self.logger else 'not available'}\n\n"
             f"SCOPE FILES: {json.dumps(task.get('scope_files', []), ensure_ascii=False)}\n\n"
             f"SCOPE TYPES: {json.dumps(task.get('scope_types', {}), ensure_ascii=False)}\n\n"
+            f"OPTIONAL TOOLS BY TARGET AND COMMAND ALIAS:\n"
+            f"{guidance_for_files(task.get('scope_files') or [])}\n\n"
             f"TASK ID: {task_id}\n"
             f"TASK TYPE: {task.get('type', 'analysis')}\n\n"
             f"TASK:\n<task>\n{task['prompt']}\n</task>\n\n"

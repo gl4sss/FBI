@@ -11,7 +11,7 @@
   <main class="shell">
     <header class="masthead">
       <div>
-        <p class="eyebrow">FBI 2.0 · Firmware Binary Inspector</p>
+        <p class="eyebrow">FBI 2.1 · Firmware Binary Inspector</p>
         <h1>Worker Dashboard</h1>
         <p class="subtitle">Investigator, Detective, Lab, Assistant 작업 상태</p>
       </div>
@@ -33,7 +33,7 @@
       <div class="graph-head">
         <div>
           <h2>실시간 작업 흐름</h2>
-          <p>선은 전담 분야에서 생성된 Detective 작업을 나타냅니다. 작업을 선택하면 세부 상태를 볼 수 있습니다.</p>
+          <p>선은 전담 분야에서 생성된 Detective 작업을 나타냅니다. 그래프 안에서 스크롤해 전체 작업을 보고, 작업을 선택하면 세부 상태를 볼 수 있습니다.</p>
         </div>
         <div class="legend" aria-label="상태 범례">
           <span><i class="legend-dot running"></i>실행 중</span>
@@ -57,6 +57,18 @@
       </div>
       <div id="detail-body" class="detail-body">이 화면은 로컬 작업 상태만 표시하며 분석 근거나 비밀 값은 읽지 않습니다.</div>
     </aside>
+    <section class="confirmed" aria-labelledby="confirmed-title">
+      <div class="confirmed-head">
+        <div>
+          <p class="eyebrow">분석 결과</p>
+          <h2 id="confirmed-title">현재까지 확인된 취약점 <span id="confirmed-count">0</span></h2>
+        </div>
+        <p>정적 근거 확인과 실행 재현 확인을 구분해 표시합니다.</p>
+      </div>
+      <div id="confirmed-list" class="confirmed-list" aria-live="polite">
+        <p class="confirmed-empty">확인된 항목이 없습니다.</p>
+      </div>
+    </section>
     <footer>로컬 상태 파일을 1초마다 읽습니다. 화면을 닫아도 분석은 계속됩니다.</footer>
   </main>
 </body>

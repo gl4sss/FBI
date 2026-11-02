@@ -54,7 +54,7 @@ def _resume_session(sessions_dir: Path) -> str | None:
 
 class Coordinator:
     def __init__(self, firmware: str | Path, state_root: str | Path = "./sessions/coordinator",
-                 *, investigator_limit: int = 3, detective_limit: int = 2,
+                 *, investigator_limit: int = 9, detective_limit: int = 2,
                  allow_network_research: bool = False, no_qemu: bool = False,
                  research_minutes: float | None = None, max_iterations: int | None = None,
                  max_specialist_tasks: int | None = None):
@@ -151,6 +151,9 @@ class Coordinator:
         key = job_key(self.firmware_sha256, identity)
         specialist_id = task.get("specialist_id") or finding.get("specialist_id")
         disposition = finding.get("disposition") or "needs_dynamic_verification"
+        if (disposition == "needs_dynamic_verification" and
+                not (finding.get("dynamic_test_question") or "").strip()):
+            disposition = "needs_static_research"
         handoff = {
             "stable_id": key, "finding_id": finding["finding_id"],
             "source_task": task["task_id"], "location": location,
@@ -167,6 +170,7 @@ class Coordinator:
             "inference": finding.get("inference", ""),
             "entry_conditions": finding.get("entry_conditions") or [],
             "counterevidence": finding.get("counterevidence") or [],
+            "dynamic_test_question": finding.get("dynamic_test_question") or "",
             "unknowns": (finding.get("unknowns") or []) +
                         (["Exact line or offset is not yet established"] if not line_or_offset else []) +
                         (["Direct observation evidence is missing"] if not evidence else []),
@@ -177,7 +181,7 @@ class Coordinator:
                               task["task_id"], identity)
         self.state.enqueue("finding", finding_key, handoff)
         self.state.finish("finding", finding_key, "complete", handoff)
-        if specialist_id and disposition != "needs_dynamic_verification":
+        if disposition != "needs_dynamic_verification" or not handoff["dynamic_test_question"].strip():
             return
         self.state.enqueue("detective", key, handoff)
         self._submit_detective(key, handoff)
@@ -467,7 +471,7 @@ def main() -> None:
     parser.add_argument("--version", action="version", version=f"FBI {VERSION}")
     parser.add_argument("firmware", help="Firmware image to inspect")
     parser.add_argument("--state-root", default="./sessions/coordinator")
-    parser.add_argument("--investigator-workers", type=int, default=3)
+    parser.add_argument("--investigator-workers", type=int, default=9)
     parser.add_argument("--detective-workers", type=int, default=2)
     parser.add_argument("--allow-network-research", action="store_true")
     parser.add_argument("--no-qemu", action="store_true")

@@ -1,6 +1,6 @@
 # Investigator
 
-펌웨어의 형식과 문자열을 수집한 뒤 Binwalk의 재귀 추출로 세션 디렉터리에 추출합니다. SquashFS 이미지가 남으면 `unsquashfs`로 내부 일반 파일을 추가 추출합니다. 스크립트, 소스 파일, 실행 파일을 코드 검토 작업에 배정하고, 서비스·설정·구성요소를 조사합니다. 발견된 의심 위치마다 진입점, 데이터 흐름, 방어 조건, 반대 근거, 영향과 남은 의문을 확인하는 별도 작업을 실행합니다. 오케스트레이터는 이 기록을 검토한 뒤 추가 작업을 결정합니다. 이전 버전과 패치 버전도 선택적으로 비교할 수 있습니다.
+펌웨어의 형식과 문자열을 수집한 뒤 Binwalk로 세션 디렉터리에 추출합니다. 추출된 파일에 이미지가 더 있으면 최대 3단계까지 다시 추출합니다. SquashFS는 `unsquashfs`, 다른 인식 가능한 이미지 파일은 Binwalk를 사용합니다. 스크립트, 소스 파일, 실행 파일을 코드 검토 작업에 배정하고, 서비스·설정·구성요소를 조사합니다. 발견된 의심 위치마다 진입점, 데이터 흐름, 방어 조건, 반대 근거, 영향과 남은 의문을 확인하는 별도 작업을 실행합니다. 오케스트레이터는 이 기록을 검토한 뒤 추가 작업을 결정합니다. 이전 버전과 패치 버전도 선택적으로 비교할 수 있습니다.
 
 통합 명령 `python3 coordinator/main.py`에서는 모든 추출 파일을 목록화하고 [`specialists.py`](specialists.py)가 로컬 단서로 10개 고정 분야에 작업을 배정합니다. 분야별 프롬프트는 [`specialist_prompts/`](specialist_prompts/README.md)에 있습니다. 단서가 없는 파일과 분야는 `적용 단서 없음`으로 기록하고 모델을 호출하지 않습니다. 단서가 불확실한 큰 코드·설정 파일은 검토 대상으로 남깁니다. 동적 검증이 필요한 발견사항만 Detective 큐로 전달합니다. 개별 Investigator 명령은 기존 코드 파일 중심 검토와 오케스트레이터를 유지합니다.
 
@@ -43,6 +43,6 @@ python3 investigator/main.py path/to/firmware.bin --resume path/to/session --res
 
 워커는 기본적으로 세션 디렉터리에서 `workspace-write`로 실행되어 `research_artifacts/`에 분석 파일을 만들 수 있습니다. 원본 펌웨어와 추출 파일은 수정하지 않도록 지시합니다. 네트워크는 기본적으로 꺼져 있으며, 외부 1차 자료를 조회하려면 `--allow-network-research`를 지정합니다. 실행 재현이나 라이브 대상 접근 권한을 부여하는 옵션은 아닙니다.
 
-세션에는 추출 매니페스트 `extraction.json`, 검토 범위 `scan_scope.json`, 시간·진행 상태 `research_status.json`, 대화형 Codex용 `GOAL_PROMPT.txt`가 저장됩니다. 통합 명령의 `scan_scope.json`에는 분야별 적용 상태, 파일 라우팅 이유, 프롬프트 버전이 기록됩니다. 작업 로그에는 분야 ID와 결과가 남고, Coordinator의 SQLite에는 분야·파일·프롬프트 버전별 상태와 잠금이 저장됩니다. `/goal`은 Codex의 대화형 스레드 기능이므로 자동 실행의 `codex exec` 안에서 켜지지 않습니다. 더 조사하려면 Codex 대화형 세션을 열고 `GOAL_PROMPT.txt`의 한 줄을 붙여 넣으세요. 추가 조사는 `research_artifacts/audit.md`와 `research_artifacts/detective_handoff.md`에 기록하도록 요청하며, 후자는 Detective가 입력으로 읽습니다. 파일 라우팅과 검토 기록은 취약점 부재를 보증하지 않습니다.
+세션에는 단계·상태가 기록된 추출 매니페스트 `extraction.json`, 대상별 도구 설치 상태 `tool_inventory.json`, 검토 범위 `scan_scope.json`, 시간·진행 상태 `research_status.json`, 대화형 Codex용 `GOAL_PROMPT.txt`가 저장됩니다. 통합 명령의 `scan_scope.json`에는 분야별 적용 상태, 파일 라우팅 이유, 프롬프트 버전이 기록됩니다. 작업 로그에는 분야 ID와 결과가 남고, Coordinator의 SQLite에는 분야·파일·프롬프트 버전별 상태와 잠금이 저장됩니다. `/goal`은 Codex의 대화형 스레드 기능이므로 자동 실행의 `codex exec` 안에서 켜지지 않습니다. 더 조사하려면 Codex 대화형 세션을 열고 `GOAL_PROMPT.txt`의 한 줄을 붙여 넣으세요. 추가 조사는 `research_artifacts/audit.md`와 `research_artifacts/detective_handoff.md`에 기록하도록 요청하며, 후자는 Detective가 입력으로 읽습니다. 파일 라우팅과 검토 기록은 취약점 부재를 보증하지 않습니다.
 
 `main.py`는 실행 흐름과 시간 예산, `extractor.py`는 추출 및 결과 검증, `scan_scope.py`는 파일 목록과 범위 기록, `specialists.py`는 고정 분야와 로컬 단서 분류, `deep_research.py`와 `orchestrator.py`는 개별 명령의 심층 조사, `worker.py`는 개별 Codex 분석을 담당합니다. `firmware_utils.py`는 바이너리 기본 정보를 수집하고 `patch_differ.py`는 두 펌웨어의 차이를 계산합니다.

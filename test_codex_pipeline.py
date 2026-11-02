@@ -21,12 +21,14 @@ from detective.main import load_investigator_session
 from detective.orchestrator import Detective
 from investigator.orchestrator import Orchestrator
 from investigator.main import _dispatch_tasks, run_analysis
-from investigator.extractor import ExtractionError, _expand_squashfs, extract_firmware
+from investigator.extractor import (ExtractionError, _expand_nested_images,
+                                   _expand_squashfs, extract_firmware)
 from investigator.deep_research import finding_research_tasks
 from investigator.scan_scope import scan_tasks
 from lab.orchestrator import LabOrchestrator
 from report_generator import _render_html, generate_report
 from shared.codex_client import extract_session_id, run_codex
+from shared.external_tools import command_for, load_catalog, target_for_file
 from shared.resume import load_completed_tasks, load_sent_task_ids
 from shared.session_manager import SessionManager
 from shared.prompting import analysis_input
@@ -468,6 +470,52 @@ class InvestigatorFlowTests(unittest.TestCase):
 
 
 class ExtractionTests(unittest.TestCase):
+    def test_nested_img_extraction_stops_after_three_levels(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            extracted = Path(temporary_dir) / "extracted"
+            extracted.mkdir()
+            (extracted / "level1.img").write_bytes(b"image level 1")
+            attempted = []
+
+            def fake_command(alias, *, input_file, output_dir):
+                self.assertEqual(alias, "binwalk_extract")
+                return ["fake_binwalk", str(output_dir), str(input_file)]
+
+            def fake_run(command, **kwargs):
+                destination = Path(command[1])
+                source = Path(command[2])
+                attempted.append(source.name)
+                level = int(source.stem.removeprefix("level"))
+                (destination / f"level{level + 1}.img").write_bytes(
+                    f"image level {level + 1}".encode())
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with patch("investigator.extractor.command_for", side_effect=fake_command), \
+                 patch("investigator.extractor.subprocess.run", side_effect=fake_run):
+                records = _expand_nested_images(extracted, time.monotonic() + 10)
+            self.assertEqual(attempted, ["level1.img", "level2.img", "level3.img"])
+            self.assertEqual([record["depth"] for record in records], [1, 2, 3])
+            self.assertTrue((extracted / "level1.img.nested" / "level2.img.nested" /
+                             "level3.img.nested" / "level4.img").exists())
+
+    def test_target_to_tool_alias_mapping(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            target = Path(temporary_dir) / "mba.mbn"
+            header = bytearray(64)
+            header[:6] = b"\x7fELF\x01\x01"
+            header[18:20] = (164).to_bytes(2, "little")
+            target.write_bytes(header)
+            self.assertEqual(target_for_file(target), "hexagon_elf")
+            catalog = load_catalog()
+            self.assertIn("hexagon_disassemble", catalog["targets"]["hexagon_elf"])
+            tool = Path(temporary_dir) / "fake objdump"
+            tool.write_text("#!/bin/sh\n")
+            tool.chmod(0o755)
+            catalog["aliases"]["hexagon_disassemble"]["binary"] = str(tool)
+            command = command_for("hexagon_disassemble", input_file=target,
+                                  catalog=catalog)
+            self.assertEqual(command, [str(tool.resolve()), "--disassemble", str(target)])
+
     @unittest.skipUnless(shutil.which("mksquashfs") and shutil.which("unsquashfs"),
                          "squashfs tools are not installed")
     def test_nested_squashfs_is_unpacked_into_reviewable_files(self):

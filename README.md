@@ -1,10 +1,11 @@
-# FBI 2.0 (Firmware Binary Inspector)
+# FBI 2.1 (Firmware Binary Inspector)
 
 FBI는 펌웨어를 추출하고 취약점 후보를 조사하는 Codex 기반 분석 도구입니다. 전담 Investigator가 분야별로 정적 분석을 수행하고, 실행 확인이 필요한 후보는 Detective가 이어서 검증합니다. 분석 과정과 결과는 로컬 세션, 작업 대시보드, 한국어 HTML 보고서로 확인할 수 있습니다.
 
 ## 주요 기능
 
-- Binwalk와 `unsquashfs`를 이용한 펌웨어 및 내부 파일시스템 추출
+- Binwalk와 `unsquashfs`를 이용한 펌웨어 및 최대 3단계 내부 이미지 추출
+- 대상 유형별 외부 분석 도구 명령 alias 목록과 설치 상태 확인
 - 고정된 10개 보안 분야별 Investigator 조사
 - 발견사항에 따른 Detective 검증과 선택적 Lab·Assistant 연계
 - 작업 상태 저장, 중복 실행 방지, 중단 후 재개
@@ -50,6 +51,9 @@ python3 coordinator/dashboard.py path/to/firmware.bin
 
 # 저장된 세션으로 보고서 다시 만들기
 python3 report_generator.py --session path/to/investigator-session
+
+# 대상 유형별 외부 도구 상태 확인
+python3 -m shared.external_tools
 ```
 
 통합 분석은 기본적으로 한 번에 전담 작업 60건까지 시작합니다. 같은 명령을 다시 실행하면 남은 작업을 이어갑니다. 외부 구성요소의 공식 자료 조회는 `--allow-network-research`를 지정했을 때만 수행합니다. 각 명령의 나머지 옵션은 `--help`에서 확인할 수 있습니다.

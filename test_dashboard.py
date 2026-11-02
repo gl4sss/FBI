@@ -12,6 +12,44 @@ from coordinator.state import StateStore, job_key
 
 
 class DashboardTests(unittest.TestCase):
+    def test_confirmed_panel_separates_static_and_reproduced_findings(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            directory = Path(temporary_dir) / "state"
+            state = StateStore(directory)
+            static_key = job_key("static")
+            static = {"stable_id": "static-site", "disposition": "static_verified",
+                      "title": "embedded credential", "category": "credential",
+                      "file_path": "/private/config.conf", "line_or_offset": "12",
+                      "evidence": ["do-not-display"]}
+            state.enqueue("finding", static_key, static)
+            state.finish("finding", static_key, "complete", static)
+            pending_key = job_key("pending")
+            state.enqueue("finding", pending_key, {
+                "disposition": "needs_dynamic_verification", "title": "unverified"})
+            state.finish("finding", pending_key, "complete", {
+                "disposition": "needs_dynamic_verification", "title": "unverified"})
+            detective_key = job_key("detective")
+            state.enqueue("detective", detective_key, {
+                "stable_id": "dynamic-site", "title": "runtime candidate",
+                "category": "command injection", "file_path": "/private/parser.c",
+                "line_or_offset": "0x20", "evidence": ["do-not-display"],
+            })
+            state.finish("detective", detective_key, "complete", {
+                "confirmed_vulns": [{"vuln_id": "VULN-1", "trigger_confirmed": True,
+                                      "title": "password=do-not-display", "cvss_score": 8.2,
+                                      "evidence": ["do-not-display"]}],
+            })
+            snapshot = read_snapshot(directory)
+            findings = snapshot["confirmed_vulnerabilities"]
+            self.assertEqual(snapshot["confirmed_count"], 2)
+            self.assertEqual([item["verification"] for item in findings], ["dynamic", "static"])
+            self.assertEqual(findings[0]["cvss_score"], 8.2)
+            self.assertEqual(findings[0]["file"], "parser.c")
+            self.assertEqual(findings[1]["file"], "config.conf")
+            self.assertNotIn("unverified", json.dumps(snapshot))
+            self.assertNotIn("do-not-display", json.dumps(snapshot))
+            self.assertNotIn("/private/", json.dumps(snapshot))
+
     def test_large_scope_keeps_counts_but_bounds_browser_payload(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             directory = Path(temporary_dir) / ("a" * 64)

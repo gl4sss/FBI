@@ -9,6 +9,7 @@ const statusNames = {
 let latest = null;
 let selected = null;
 let loading = false;
+let confirmedFingerprint = "";
 
 function svg(tag, attrs = {}, parent = graph) {
   const element = document.createElementNS(SVG, tag);
@@ -68,6 +69,54 @@ function stageStatus(items) {
   return "complete";
 }
 
+function renderConfirmed(data) {
+  const findings = data.confirmed_vulnerabilities || [];
+  const total = data.confirmed_count || 0;
+  const fingerprint = JSON.stringify([total, findings]);
+  if (fingerprint === confirmedFingerprint) return;
+  confirmedFingerprint = fingerprint;
+  document.getElementById("confirmed-count").textContent = String(total);
+  const list = document.getElementById("confirmed-list");
+  list.replaceChildren();
+  if (!findings.length) {
+    const empty = document.createElement("p");
+    empty.className = "confirmed-empty";
+    empty.textContent = "확인된 항목이 없습니다.";
+    list.appendChild(empty);
+    return;
+  }
+  for (const finding of findings) {
+    const item = document.createElement("article");
+    item.className = "confirmed-item";
+    const main = document.createElement("div");
+    const title = document.createElement("h3");
+    title.textContent = finding.title;
+    main.appendChild(title);
+    const meta = document.createElement("div");
+    meta.className = "confirmed-meta";
+    for (const value of [finding.category,
+      `${finding.file || "위치 미기록"}${finding.line ? `:${finding.line}` : ""}`,
+      finding.cvss_score == null ? "위험도 미평가" : `CVSS ${finding.cvss_score.toFixed(1)}`]) {
+      const part = document.createElement("span");
+      part.textContent = value;
+      meta.appendChild(part);
+    }
+    main.appendChild(meta);
+    item.appendChild(main);
+    const badge = document.createElement("span");
+    badge.className = `confirmed-badge ${finding.verification === "dynamic" ? "dynamic" : "static"}`;
+    badge.textContent = finding.verification === "dynamic" ? "실행 재현 확인" : "정적 근거 확인";
+    item.appendChild(badge);
+    list.appendChild(item);
+  }
+  if (total > findings.length) {
+    const more = document.createElement("p");
+    more.className = "confirmed-more";
+    more.textContent = `목록에 표시하지 않은 항목 ${total - findings.length}건`;
+    list.appendChild(more);
+  }
+}
+
 function render(data) {
   latest = data;
   document.getElementById("firmware-id").textContent = data.firmware_id;
@@ -80,6 +129,7 @@ function render(data) {
   document.getElementById("updated-at").textContent = new Date(data.observed_at).toLocaleTimeString("ko-KR");
   document.getElementById("connection-label").textContent = "실시간 연결";
   document.getElementById("connection").classList.remove("offline");
+  renderConfirmed(data);
 
   const visible = data.detectives.slice(0, 12);
   const height = Math.max(865, 125 + 68 * Math.max(data.specialists.length, visible.length) + 30);

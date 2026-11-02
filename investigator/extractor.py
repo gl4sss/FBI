@@ -7,80 +7,108 @@ import subprocess
 import time
 from pathlib import Path
 
+from shared.external_tools import command_for, target_for_file
+
 
 class ExtractionError(RuntimeError):
     """Raised when extraction cannot supply files for analysis."""
 
 
-NESTED_EXTRACTION_VERSION = 1
-SQUASHFS_MAGIC = (b"hsqs", b"sqsh", b"qshs", b"shsq")
+NESTED_EXTRACTION_VERSION = 2
+MAX_NESTED_DEPTH = 3
+MAX_NESTED_IMAGES_PER_RUN = 24
+MAX_NESTED_IMAGE_BYTES = 512 * 1024 * 1024
 
 
-def _expand_squashfs(root: Path, deadline: float, max_images: int = 12) -> list[dict]:
-    """Unpack SquashFS containers Binwalk left as opaque image files."""
+def _image_candidates(directory: Path, *, squashfs_only: bool = False):
+    for current, folders, names in os.walk(directory, followlinks=False):
+        folders[:] = sorted(name for name in folders
+                            if not (Path(current) / name).is_symlink()
+                            and not name.endswith((".root", ".nested"))
+                            and ".root_retry_" not in name
+                            and ".nested_retry_" not in name)
+        for name in sorted(names):
+            path = Path(current) / name
+            target = target_for_file(path)
+            if target == "squashfs" or (target == "nested_image" and not squashfs_only):
+                yield path, target
+
+
+def _expand_nested_images(root: Path, deadline: float, *, max_depth: int = MAX_NESTED_DEPTH,
+                          max_images: int = MAX_NESTED_IMAGES_PER_RUN,
+                          squashfs_only: bool = False) -> list[dict]:
+    """Expand recognized image files with an explicit depth and per-run limit."""
     records = []
-    processed = set()
-    while len(processed) < max_images:
-        images = []
-        for directory, folders, names in os.walk(root, followlinks=False):
-            folders[:] = [name for name in folders
-                          if not (Path(directory) / name).is_symlink()]
-            for name in names:
-                path = Path(directory) / name
-                if path in processed or path.is_symlink():
-                    continue
-                try:
-                    with path.open("rb") as stream:
-                        if stream.read(4) in SQUASHFS_MAGIC:
-                            images.append(path)
-                except OSError:
-                    continue
-        if not images:
-            break
-        for image in images[:max_images - len(processed)]:
-            processed.add(image)
+    queue = [(root, 1)]
+    extracted_this_run = 0
+    while queue:
+        directory, depth = queue.pop(0)
+        if depth > max_depth:
+            continue
+        for image, target in _image_candidates(directory, squashfs_only=squashfs_only):
             relative = str(image.relative_to(root))
-            destination = image.with_name(image.name + ".root")
-            if destination.is_dir() and _inventory(destination)[0]:
-                records.append({"source": relative, "status": "reused",
-                                "file_count": _inventory(destination)[0]})
+            suffix = "root" if target == "squashfs" else "nested"
+            destination = image.with_name(image.name + f".{suffix}")
+            variants = [destination, *sorted(image.parent.glob(
+                image.name + f".{suffix}_retry_*"))]
+            reusable = next((path for path in variants
+                             if path.is_dir() and _inventory(path)[0]), None)
+            if reusable:
+                records.append({"source": relative, "type": target, "depth": depth,
+                                "status": "reused", "file_count": _inventory(reusable)[0]})
+                if depth < max_depth:
+                    queue.append((reusable, depth + 1))
                 continue
             if destination.exists():
                 retry = 1
                 while destination.exists():
-                    destination = image.with_name(image.name + f".root_retry_{retry}")
+                    destination = image.with_name(image.name + f".{suffix}_retry_{retry}")
                     retry += 1
+            record = {"source": relative, "type": target, "depth": depth}
+            if extracted_this_run >= max_images:
+                records.append({**record, "status": "pending",
+                                "reason": "nested extraction per-run limit reached"})
+                continue
             if time.monotonic() >= deadline:
-                records.append({"source": relative, "status": "failed",
+                records.append({**record, "status": "pending",
                                 "reason": "extraction time budget reached"})
                 continue
-            if not shutil.which("unsquashfs"):
-                records.append({"source": relative, "status": "failed",
-                                "reason": "unsquashfs is not installed"})
+            if image.stat().st_size > MAX_NESTED_IMAGE_BYTES:
+                records.append({**record, "status": "failed",
+                                "reason": "nested image exceeds 512 MiB extraction limit"})
                 continue
-            if image.stat().st_size > 512 * 1024 * 1024:
-                records.append({"source": relative, "status": "failed",
-                                "reason": "SquashFS image exceeds 512 MiB extraction limit"})
+            alias = "squashfs_extract" if target == "squashfs" else "binwalk_extract"
+            command = command_for(alias, input_file=image, output_dir=destination)
+            if command is None:
+                records.append({**record, "status": "failed",
+                                "reason": f"{alias} is not installed"})
                 continue
+            extracted_this_run += 1
             destination.mkdir()
-            command = ["unsquashfs", "-quiet", "-no-progress", "-no-xattrs",
-                       "-ignore-errors", "-dest", str(destination), str(image)]
             try:
                 result = subprocess.run(command, capture_output=True, text=True,
                                         timeout=max(1, deadline - time.monotonic()))
                 count = _inventory(destination)[0]
                 if not count:
                     shutil.rmtree(destination)
-                records.append({"source": relative,
-                                "status": ("partial" if result.returncode and count else
-                                           "complete" if count else "failed"),
-                                "file_count": count,
-                                "reason": (result.stderr or "")[-500:] if result.returncode else ""})
+                status = ("partial" if result.returncode and count else
+                          "complete" if count else
+                          "failed" if result.returncode else "skipped")
+                records.append({**record, "status": status, "file_count": count,
+                                "reason": ((result.stderr or "")[-500:] if result.returncode else
+                                           "no nested payload recognized" if not count else "")})
+                if count and depth < max_depth:
+                    queue.append((destination, depth + 1))
             except subprocess.TimeoutExpired:
                 shutil.rmtree(destination)
-                records.append({"source": relative, "status": "failed",
-                                "reason": "unsquashfs exceeded extraction time budget"})
+                records.append({**record, "status": "pending",
+                                "reason": f"{alias} exceeded extraction time budget"})
     return records
+
+
+def _expand_squashfs(root: Path, deadline: float, max_images: int = 12) -> list[dict]:
+    """Compatibility helper for SquashFS-only expansion."""
+    return _expand_nested_images(root, deadline, max_images=max_images, squashfs_only=True)
 
 
 def _inventory(root: Path) -> tuple[int, list[str], int]:
@@ -116,10 +144,10 @@ def extract_firmware(firmware_path: str, session_dir: str | Path,
             count, sample, symlinks = _inventory(prior_dir)
             if count:
                 needs_retry = (prior.get("nested_extraction_version") != NESTED_EXTRACTION_VERSION
-                               or any(item.get("status") == "failed"
+                               or any(item.get("status") in {"failed", "pending"}
                                       for item in prior.get("nested_extraction") or []))
                 if needs_retry:
-                    nested = _expand_squashfs(prior_dir, deadline)
+                    nested = _expand_nested_images(prior_dir, deadline)
                     count, sample, symlinks = _inventory(prior_dir)
                     prior.update({"nested_extraction_version": NESTED_EXTRACTION_VERSION,
                                   "nested_extraction": nested, "file_count": count,
@@ -138,23 +166,24 @@ def extract_firmware(firmware_path: str, session_dir: str | Path,
         retry += 1
     output_dir.mkdir(parents=True)
 
-    command = ["binwalk", "--extract", "--matryoshka", "--directory", str(output_dir),
-               str(Path(firmware_path).resolve())]
-    try:
-        result = subprocess.run(command, capture_output=True, text=True,
-                                timeout=timeout)
-        exit_code = result.returncode
-        stdout = result.stdout[-4000:]
-        stderr = result.stderr[-4000:]
-        error = None
-    except FileNotFoundError:
+    command = command_for("binwalk_extract", input_file=Path(firmware_path).resolve(),
+                          output_dir=output_dir)
+    if command is None:
         exit_code, stdout, stderr = None, "", ""
         error = "binwalk is not installed; install it before running Investigator"
-    except subprocess.TimeoutExpired:
-        exit_code, stdout, stderr = None, "", ""
-        error = f"binwalk extraction exceeded {timeout} seconds"
+    else:
+        try:
+            result = subprocess.run(command, capture_output=True, text=True,
+                                    timeout=timeout)
+            exit_code = result.returncode
+            stdout = result.stdout[-4000:]
+            stderr = result.stderr[-4000:]
+            error = None
+        except subprocess.TimeoutExpired:
+            exit_code, stdout, stderr = None, "", ""
+            error = f"binwalk extraction exceeded {timeout} seconds"
 
-    nested = _expand_squashfs(output_dir, deadline)
+    nested = _expand_nested_images(output_dir, deadline)
     count, sample, symlinks = _inventory(output_dir)
     if not error and exit_code != 0:
         error = f"binwalk exited with code {exit_code}: {stderr or stdout or 'no details'}"

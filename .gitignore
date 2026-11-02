@@ -9,6 +9,8 @@ venv/
 .env
 .env.*
 !.env.example
+external_tools.json
+tool_catalog.json
 
 # Local analysis sessions and generated output
 /sessions/

@@ -400,6 +400,8 @@ class CoordinatorTests(unittest.TestCase):
                             "observation": "unbounded copy into stack buffer",
                             "evidence": ["parser.c:1 strcpy"],
                             "disposition": "needs_dynamic_verification",
+                            "dynamic_test_question": "Does a bounded input reach the copy?",
+                            "unknowns": ["Runtime reachability is unresolved"],
                         }]
                     return validate_worker_result(result, task["task_id"])
                 finally:
@@ -426,6 +428,71 @@ class CoordinatorTests(unittest.TestCase):
             self.assertEqual(summary["specialist"].get("failed", 0), 0)
             self.assertEqual(len(set(worker_ids.values())), len(worker_ids))
 
+    def test_specialist_slot_refills_before_slowest_task_finishes(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            firmware = root / "fixture.bin"
+            firmware.write_bytes(b"synthetic firmware")
+            third_started = threading.Event()
+            info = {"path": str(firmware), "filename": firmware.name,
+                    "file_type": "data", "size_bytes": firmware.stat().st_size,
+                    "hashes": {"sha256": "fixture", "md5": "fixture"},
+                    "strings_sample": [], "binwalk": None}
+
+            def fake_extract(path, session_dir, sha, timeout=300):
+                extracted = Path(session_dir) / "extracted"
+                extracted.mkdir(exist_ok=True)
+                (extracted / "parser.c").write_text("void parse(void) {}\n")
+                return {"status": "complete", "output_dir": str(extracted),
+                        "file_count": 1}
+
+            def fake_plan(inventory, extracted_dir):
+                scoped = str(Path(extracted_dir) / "parser.c")
+                return ([{
+                    "task_id": f"task_{index}", "type": "specialist_analysis",
+                    "specialist_id": identifier, "prompt_version": "test",
+                    "scope_files": [scoped],
+                } for index, identifier in enumerate(
+                    ("secrets", "stack_overflow", "memory_safety"), 1)], {})
+
+            def fake_worker(self, task, session_id, path, extracted_dir):
+                if task["task_id"] == "task_1":
+                    if not third_started.wait(2):
+                        raise AssertionError("the free slot did not start task_3")
+                elif task["task_id"] == "task_3":
+                    third_started.set()
+                return {"task_id": task["task_id"], "status": "completed",
+                        "reviewed_files": task["scope_files"], "findings": [],
+                        "suspected_findings": []}
+
+            with patch("investigator.main.analyze_firmware", return_value=info), \
+                 patch("investigator.main.extract_firmware", side_effect=fake_extract), \
+                 patch("investigator.main.plan_specialists", side_effect=fake_plan), \
+                 patch("investigator.main.Worker.execute", fake_worker), \
+                 patch("report_generator.generate_report", return_value="report.html"), \
+                 redirect_stdout(io.StringIO()):
+                summary = Coordinator(firmware, root / "state", investigator_limit=2,
+                                      no_qemu=True).run()
+            self.assertTrue(third_started.is_set())
+            self.assertEqual(summary["specialist"]["complete"], 3)
+
+    def test_legacy_dynamic_candidate_without_question_stays_in_static_research(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            firmware, session, extracted = self._fixture(root)
+            coordinator = Coordinator(firmware, root / "state", no_qemu=True)
+            file_path = str(extracted / "parser.c")
+            coordinator._on_finding({
+                "finding_id": "sp_authz_1-001", "location": file_path + ":12",
+                "file_path": file_path, "line_or_offset": "12",
+                "disposition": "needs_dynamic_verification", "title": "candidate",
+                "evidence": ["parser.c:12"],
+            }, {"task_id": "sp_authz_1", "specialist_id": "authz",
+                "scope_files": [file_path]}, session)
+            self.assertEqual(coordinator.state.list_jobs("finding")[0]["result"]["disposition"],
+                             "needs_static_research")
+            self.assertEqual(coordinator.state.list_jobs("detective"), [])
+
     def test_same_root_cause_from_two_specialists_has_one_detective_job(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)
@@ -440,6 +507,7 @@ class CoordinatorTests(unittest.TestCase):
                         "location": str(extracted / "parser.c") + ":12",
                         "file_path": str(extracted / "parser.c"),
                         "line_or_offset": "12", "disposition": "needs_dynamic_verification",
+                        "dynamic_test_question": "Does this parser accept the crafted input?",
                         "title": identifier, "evidence": ["parser.c:12"],
                     }, {"task_id": f"sp_{identifier}", "specialist_id": identifier,
                         "scope_files": [str(extracted / "parser.c")]}, session)
@@ -730,6 +798,8 @@ class CoordinatorTests(unittest.TestCase):
                         "location": str(extracted / f"file{index}.sh") + ":1",
                         "title": f"site {index}", "category": "shell",
                         "evidence": [f"file{index}:1"],
+                        "disposition": "needs_dynamic_verification",
+                        "dynamic_test_question": "Is this shell path reachable?",
                     }, {"task_id": f"scan_{index + 1:04d}"}, session)
                 self.assertTrue(started.wait(1), "Detective did not begin during Investigator")
                 return session
@@ -806,6 +876,8 @@ class CoordinatorTests(unittest.TestCase):
                         "line_or_offset": "2", "input_path": "shell argument",
                         "use_path": "eval call",
                         "disposition": "needs_dynamic_verification",
+                        "dynamic_test_question": "Does this input reach eval?",
+                        "unknowns": ["Runtime input reachability is unresolved"],
                         "title": "shell input", "category": "command",
                         "observation": "eval reads shell argument",
                         "evidence": ["a.sh:2 eval"],
@@ -997,7 +1069,9 @@ class CoordinatorTests(unittest.TestCase):
                 kwargs["on_extracted"](session, {}, str(extracted))
                 finding = {"finding_id": "scan_0001-001",
                            "location": str(extracted / "a.sh") + ":1",
-                           "title": "site", "evidence": ["a.sh:1"]}
+                           "title": "site", "evidence": ["a.sh:1"],
+                           "disposition": "needs_dynamic_verification",
+                           "dynamic_test_question": "Is this path reachable at runtime?"}
                 kwargs["on_finding"](finding, {"task_id": "scan_0001"}, session)
                 kwargs["on_finding"](finding, {"task_id": "scan_0001"}, session)
                 return session
@@ -1031,6 +1105,8 @@ class CoordinatorTests(unittest.TestCase):
                         "finding_id": f"scan_{index + 1:04d}-001",
                         "location": f"{extracted}/site{index}.sh:1",
                         "title": "same issue", "evidence": ["observed code"],
+                        "disposition": "needs_dynamic_verification",
+                        "dynamic_test_question": "Is this site reachable at runtime?",
                     }, {"task_id": f"scan_{index + 1:04d}"}, session)
                 return session
 
@@ -1126,6 +1202,22 @@ class CoordinatorTests(unittest.TestCase):
         }, "sp_secrets_example")
         self.assertEqual(checked["suspected_findings"][0]["disposition"],
                          "insufficient_evidence")
+
+    def test_dynamic_handoff_requires_a_runtime_question(self):
+        checked = validate_worker_result({
+            "task_id": "sp_authz_example", "status": "completed", "findings": [],
+            "suspected_findings": [{
+                "file_path": "/tmp/auth.c", "line_or_offset": "12",
+                "location": "/tmp/auth.c:12", "title": "access check",
+                "observation": "guard uses a runtime setting", "input_path": "request",
+                "use_path": "access guard", "evidence": ["auth.c:12"],
+                "unknowns": ["Runtime setting is unresolved"],
+                "disposition": "needs_dynamic_verification",
+            }],
+        }, "sp_authz_example")
+        self.assertEqual(checked["suspected_findings"][0]["disposition"],
+                         "needs_static_research")
+        self.assertEqual(checked["status"], "partial")
 
     def test_cve_string_without_affected_code_cannot_request_detective(self):
         checked = validate_worker_result({
@@ -1367,9 +1459,15 @@ class CoordinatorTests(unittest.TestCase):
             settings["analysis"]["qemu_lock_dir"] = str(root / "locks")
             lab_calls = []
             stops = []
-            roadmap = {"status": "complete", "analysis_summary": "environment needed",
-                       "new_tasks": [], "confirmed_vulns": [],
-                       "lab_required": True, "lab_reason": "boot not verified"}
+            roadmaps = [
+                {"status": "in_progress", "analysis_summary": "environment needed",
+                 "new_tasks": [{"task_id": "poc_1", "type": "poc_testing",
+                                "prompt": "Test boot-dependent behavior"}],
+                 "confirmed_vulns": [], "lab_required": True,
+                 "lab_reason": "boot not verified"},
+                {"status": "complete", "analysis_summary": "test finished",
+                 "new_tasks": [], "confirmed_vulns": [], "lab_required": False},
+            ]
 
             def fake_lab(*args):
                 lab_calls.append(1)
@@ -1380,16 +1478,66 @@ class CoordinatorTests(unittest.TestCase):
             with patch("detective.main.load_investigator_session",
                        return_value=({"path": str(firmware)}, [], "")), \
                  patch("detective.main.QemuRunner.start", return_value={"started": True,
-                       "pid": 123, "arch": "arm", "connection_info": "local"}), \
+                       "pid": 123, "arch": "arm", "connection_info": "local"}) as start_qemu, \
                  patch("detective.main.QemuRunner.stop", side_effect=lambda: stops.append(1)), \
-                 patch("detective.main.Detective.decide", return_value=roadmap), \
+                 patch("detective.main.Detective.decide", side_effect=roadmaps), \
+                 patch("detective.main._dispatch_tasks", return_value=[]), \
                  patch("report_generator.generate_report", return_value="report.html"), \
                  redirect_stdout(io.StringIO()):
                 result = run_detective(str(session), settings, str(firmware),
                                        lab_request=fake_lab)
             self.assertEqual(len(lab_calls), 1)
-            self.assertTrue(stops)
+            start_qemu.assert_not_called()
+            self.assertFalse(stops)
             self.assertFalse(result["lab"]["verification"]["qemu_boots"])
+
+    def test_detective_does_not_start_qemu_without_a_runtime_test(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            firmware, session, _ = self._fixture(root)
+            settings = json.loads(Path("detective/settings.json").read_text())
+            settings["analysis"]["sessions_dir"] = str(root / "detective-sessions")
+            settings["analysis"]["qemu_lock_dir"] = str(root / "locks")
+            roadmap = {"status": "complete", "analysis_summary": "static evidence resolves the question",
+                       "new_tasks": [], "confirmed_vulns": [], "lab_required": False}
+            with patch("detective.main.load_investigator_session",
+                       return_value=({"path": str(firmware)}, [], "")), \
+                 patch("detective.main.QemuRunner.start") as start_qemu, \
+                 patch("detective.main.Detective.decide", return_value=roadmap), \
+                 patch("report_generator.generate_report", return_value="report.html"), \
+                 redirect_stdout(io.StringIO()):
+                result = run_detective(str(session), settings, str(firmware))
+            start_qemu.assert_not_called()
+            self.assertFalse(result["qemu"]["started"])
+
+    def test_detective_starts_qemu_for_planned_runtime_test(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            firmware, session, _ = self._fixture(root)
+            settings = json.loads(Path("detective/settings.json").read_text())
+            settings["analysis"]["sessions_dir"] = str(root / "detective-sessions")
+            settings["analysis"]["qemu_lock_dir"] = str(root / "locks")
+            roadmaps = [
+                {"status": "in_progress", "analysis_summary": "runtime test needed",
+                 "new_tasks": [{"task_id": "poc_1", "type": "poc_testing",
+                                "prompt": "Test the unresolved input path"}],
+                 "confirmed_vulns": [], "lab_required": False},
+                {"status": "complete", "analysis_summary": "test finished",
+                 "new_tasks": [], "confirmed_vulns": [], "lab_required": False},
+            ]
+            with patch("detective.main.load_investigator_session",
+                       return_value=({"path": str(firmware)}, [], "")), \
+                 patch("detective.main.QemuRunner.start", return_value={
+                     "started": True, "pid": 123, "arch": "arm",
+                     "connection_info": "local"}) as start_qemu, \
+                 patch("detective.main.QemuRunner.stop"), \
+                 patch("detective.main.Detective.decide", side_effect=roadmaps), \
+                 patch("detective.main._dispatch_tasks", return_value=[]), \
+                 patch("report_generator.generate_report", return_value="report.html"), \
+                 redirect_stdout(io.StringIO()):
+                result = run_detective(str(session), settings, str(firmware))
+            start_qemu.assert_called_once()
+            self.assertTrue(result["qemu"]["started"])
 
 
 if __name__ == "__main__":

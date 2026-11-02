@@ -1,0 +1,38 @@
+{
+  "aliases": {
+    "binwalk_extract": {
+      "binary": "binwalk",
+      "args": ["--extract", "--directory", "{output_dir}", "{input_file}"],
+      "purpose": "Extract firmware and nested image containers",
+      "mode": "automatic"
+    },
+    "squashfs_extract": {
+      "binary": "unsquashfs",
+      "args": ["-quiet", "-no-progress", "-no-xattrs", "-ignore-errors", "-dest", "{output_dir}", "{input_file}"],
+      "purpose": "Expand SquashFS images into reviewable files",
+      "mode": "automatic"
+    },
+    "hexagon_disassemble": {
+      "binary": "llvm-objdump",
+      "args": ["--disassemble", "{input_file}"],
+      "fallback_paths": [
+        "/opt/homebrew/opt/llvm/bin/llvm-objdump",
+        "/usr/local/opt/llvm/bin/llvm-objdump"
+      ],
+      "purpose": "Disassemble Qualcomm Hexagon ELF code",
+      "mode": "automatic"
+    },
+    "ghidra_review": {
+      "binary": "ghidraRun",
+      "args": [],
+      "purpose": "Open a Hexagon ELF for interactive code review",
+      "mode": "manual"
+    }
+  },
+  "targets": {
+    "firmware_image": ["binwalk_extract"],
+    "nested_image": ["binwalk_extract"],
+    "squashfs": ["squashfs_extract"],
+    "hexagon_elf": ["hexagon_disassemble", "ghidra_review"]
+  }
+}

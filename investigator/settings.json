@@ -5,7 +5,7 @@
   },
   "worker": {
     "model": "gpt-6-sol",
-    "parallel_limit": 3,
+    "parallel_limit": 9,
     "sandbox": "workspace-write",
     "bypass_approvals": false,
     "sandbox_permissions": [],

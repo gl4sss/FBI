@@ -100,7 +100,7 @@ def validate_worker_result(result: dict, task_id: str,
             raise ValueError(f"Task {task_id} has an invalid suspected finding")
         item["finding_id"] = f"{task_id}-{index:03d}"
         for field in ("location", "file_path", "line_or_offset", "title", "category", "observation", "inference",
-                      "recommendation", "input_path", "use_path", "root_cause"):
+                      "recommendation", "input_path", "use_path", "root_cause", "dynamic_test_question"):
             if not isinstance(item.get(field, ""), str):
                 raise ValueError(f"Task {task_id} has invalid {field} in suspected finding")
         item_evidence = item.setdefault("evidence", [])
@@ -127,6 +127,13 @@ def validate_worker_result(result: dict, task_id: str,
                     result["status"] = "partial"
                 result["follow_up_needed"] = True
                 result["follow_up_reason"] = "Specialist claim lacks exact location, observed behavior, input/use path, or direct evidence"
+            if item["disposition"] == "needs_dynamic_verification" and (
+                    not item.get("dynamic_test_question", "").strip() or not item["unknowns"]):
+                item["disposition"] = "needs_static_research"
+                if result["status"] == "completed":
+                    result["status"] = "partial"
+                result["follow_up_needed"] = True
+                result["follow_up_reason"] = "Dynamic verification needs a specific runtime question and unresolved static condition"
             if task_id.startswith("sp_secrets_") and item["disposition"] == "static_verified":
                 path = Path(item.get("file_path") or "")
                 context = " ".join((item.get("title") or "", item.get("observation") or "")).lower()
