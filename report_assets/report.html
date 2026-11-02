@@ -35,13 +35,7 @@
   ${pipeline_html}
 
   <h2>4. 발견사항 요약</h2>
-  <div class="sev-summary">
-    <span class="sev-chip critical">긴급 ${critical_count}건</span>
-    <span class="sev-chip high">높음 ${high_count}건</span>
-    <span class="sev-chip medium">보통 ${medium_count}건</span>
-    <span class="sev-chip low">낮음 ${low_count}건</span>
-    <span class="sev-chip info">정보 ${info_count}건</span>
-  </div>
+  <nav class="sev-summary" aria-label="심각도별 발견사항">${severity_summary}</nav>
   ${vuln_table}
 
   <h2>5. 발견사항 상세</h2>

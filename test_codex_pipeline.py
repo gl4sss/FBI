@@ -558,6 +558,44 @@ class ExtractionTests(unittest.TestCase):
 
 
 class ValidationTests(unittest.TestCase):
+    def test_report_orders_severity_and_highlights_type_and_code_location(self):
+        tasks = [{
+            "task_id": "scan_0001", "type": "code_analysis", "status": "completed",
+            "suspected_findings": [
+                {"finding_id": "low-001", "title": "Low finding",
+                 "category": "정보 노출", "location": "/tmp/root/etc/config:12",
+                 "evidence": ["config:12 exposes metadata"]},
+                {"finding_id": "high-001", "title": "High finding",
+                 "category": "명령 주입", "location": "/tmp/root/www/handler.cgi:41",
+                 "evidence": ["handler.cgi:41 passes input to shell"]},
+            ],
+        }]
+        report = validate_report({"vulnerabilities": [
+            {"source_task": "scan_0001", "source_finding_id": "low-001",
+             "severity": "low"},
+            {"source_task": "scan_0001", "source_finding_id": "high-001",
+             "severity": "high"},
+        ]}, tasks)
+        self.assertEqual([item["source_finding_id"] for item in report["vulnerabilities"]],
+                         ["high-001", "low-001"])
+        self.assertEqual([item["id"] for item in report["vulnerabilities"]],
+                         ["FBI-001", "FBI-002"])
+        html = _render_html({"session_path": "sessions/sample", "firmware_info": {
+            "filename": "sample.bin", "size_bytes": 6, "hashes": {},
+            "extraction": {"output_dir": "/tmp/root"},
+        }, "completed_tasks": tasks}, report)
+        summary = html.split('<ol class="finding-list"')[1].split("</ol>")[0]
+        details = html.split('<h2>5. 발견사항 상세</h2>')[1]
+        self.assertLess(summary.index("High finding"), summary.index("Low finding"))
+        self.assertLess(details.index("High finding"), details.index("Low finding"))
+        self.assertIn("취약점 종류", summary)
+        self.assertIn("명령 주입", summary)
+        self.assertIn("&lt;extracted&gt;/www/handler.cgi", summary)
+        self.assertIn('class="location-position">:41</span>', summary)
+        self.assertIn('href="#finding-1"', summary)
+        self.assertIn('href="#severity-high"', html)
+        self.assertIn('id="severity-high"', summary)
+
     def test_system_research_site_gets_its_own_investigation(self):
         completed = [{"task_id": "research_surface", "type": "other", "result": {
             "suspected_findings": [{"finding_id": "research_surface-001",

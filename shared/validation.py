@@ -482,6 +482,10 @@ def validate_report(report: dict, completed_tasks: list[dict]) -> dict:
         target = reported_by_finding.get(research.get("source_finding_id"))
         if target:
             target["research"] = research
+    severity_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    accepted.sort(key=lambda item: severity_rank.get(item.get("severity"), 4))
+    for index, item in enumerate(accepted, 1):
+        item["id"] = f"FBI-{index:03d}"
     report["vulnerabilities"] = accepted
     report["candidate_count"] = len(candidates)
     limitations = report.get("limitations")

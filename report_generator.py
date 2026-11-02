@@ -286,6 +286,7 @@ def _read_summary_cache(path: Path) -> dict:
 
 # HTML 렌더링
 _SEV_KO  = {"critical": "긴급", "high": "높음", "medium": "보통", "low": "낮음", "info": "정보"}
+_SEV_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 _RISK_KO = {"Critical": "긴급", "High": "높음", "Medium": "보통", "Low": "낮음", "Informational": "정보"}
 
 
@@ -297,6 +298,16 @@ def _esc(text) -> str:
         .replace(">", "&gt;")
         .replace('"', "&quot;")
     )
+
+
+def _display_location(location: str, extraction_dir: str = "") -> tuple[str, str]:
+    value = str(location or "위치 미기록")
+    if extraction_dir and value.startswith(extraction_dir):
+        value = "<extracted>" + value[len(extraction_dir):]
+    match = re.fullmatch(r"(.+?)([:+])(0x[0-9a-fA-F]+|\d+)", value)
+    if not match:
+        return value, ""
+    return match.group(1), f"{match.group(2)}{match.group(3)}"
 
 
 def _render_html(data: dict, report: dict) -> str:
@@ -315,36 +326,59 @@ def _render_html(data: dict, report: dict) -> str:
     if not report.get("vulnerabilities"):
         risk_note = "보고 가능한 발견사항 없음"
 
-    vulns = report.get("vulnerabilities", [])
+    vulns = sorted(report.get("vulnerabilities", []),
+                   key=lambda item: _SEV_RANK.get(item.get("severity"), 4))
+    extraction_dir = (fi.get("extraction") or {}).get("output_dir") or ""
     sev_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
     for v in vulns:
         s = v.get("severity", "info")
         sev_counts[s] = sev_counts.get(s, 0) + 1
+    severity_summary = "".join(
+        (f'<a class="sev-chip {level}" href="#severity-{level}">{_SEV_KO[level]} {sev_counts[level]}건</a>'
+         if sev_counts[level] else
+         f'<span class="sev-chip {level}">{_SEV_KO[level]} 0건</span>')
+        for level in _SEV_RANK
+    )
 
-    # 취약점 테이블
+    # 심각도 순서의 발견사항 목록
     vuln_rows = ""
+    seen_levels = set()
     for i, v in enumerate(vulns, 1):
         sev = v.get("severity", "info")
         sev_ko = _SEV_KO.get(sev, sev)
+        location_path, location_position = _display_location(
+            v.get("location"), extraction_dir)
+        anchor = f"finding-{i}"
+        severity_anchor = f' id="severity-{sev}"' if sev not in seen_levels else ""
+        seen_levels.add(sev)
         vuln_rows += f"""
-        <tr>
-          <td>{i}</td>
-          <td><span class="sev-badge {sev}">{sev_ko}</span></td>
-          <td><strong>{_esc(v.get('title', ''))}</strong></td>
-          <td><code>{_esc(v.get('location', '위치 미기록'))}</code></td>
-          <td>{_esc(v.get('category', ''))}</td>
-          <td><code>{_esc(v.get('source_task', ''))}</code></td>
-          <td>{_esc(v.get('verification_status', '재현 미실시'))}</td>
-        </tr>"""
+        <li class="finding-item {sev}"{severity_anchor}>
+          <span class="finding-number">{i:02d}</span>
+          <div class="finding-content">
+            <div class="finding-title-row">
+              <span class="sev-badge {sev}">{sev_ko}</span>
+              <a class="finding-title" href="#{anchor}">{_esc(v.get('title') or '제목 미기록')}</a>
+            </div>
+            <div class="finding-facts">
+              <span class="finding-type"><span class="fact-label">취약점 종류</span>
+                <strong>{_esc(v.get('category') or '추가 분류 필요')}</strong></span>
+              <span class="verification-status">{_esc(v.get('verification_status') or '재현 미실시')}</span>
+            </div>
+            <div class="finding-location"><span class="fact-label">코드 위치</span>
+              <code>{_esc(location_path)}</code>
+              {f'<span class="location-position">{_esc(location_position)}</span>' if location_position else ''}
+            </div>
+          </div>
+        </li>"""
 
     # 취약점 상세 카드
     vuln_cards = ""
-    for v in vulns:
+    for i, v in enumerate(vulns, 1):
         sev = v.get("severity", "info")
         sev_ko = _SEV_KO.get(sev, sev)
         vid = _esc(v.get("id", ""))
-        vtitle = _esc(v.get("title", ""))
-        vcat = _esc(v.get("category", ""))
+        vtitle = _esc(v.get("title") or "제목 미기록")
+        vcat = _esc(v.get("category") or "추가 분류 필요")
         vdesc = _esc(v.get("description", ""))
         vevid = _esc(v.get("evidence", ""))
         vinfer = _esc(v.get("inference", ""))
@@ -352,7 +386,8 @@ def _render_html(data: dict, report: dict) -> str:
         vrec = _esc(v.get("recommendation", ""))
         vsrc = _esc(v.get("source_task", ""))
         vfinding = _esc(v.get("source_finding_id", ""))
-        vlocation = _esc(v.get("location", "위치 미기록"))
+        location_path, location_position = _display_location(
+            v.get("location"), extraction_dir)
         vstatus = _esc(v.get("verification_status", "재현 미실시"))
         research = v.get("research") or {}
         research_rows = ""
@@ -371,25 +406,30 @@ def _render_html(data: dict, report: dict) -> str:
         if research.get("impact"):
             research_rows += f"<dt>심층 조사 영향</dt><dd>{_esc(research['impact'])}</dd>"
         vuln_cards += f"""
-        <div class="vuln-card" id="{vid}">
+        <article class="vuln-card {sev}" id="finding-{i}">
           <div class="vuln-header">
             <span class="sev-badge {sev}">{sev_ko}</span>
             <span class="vuln-id">{vid}</span>
-            <strong>{vtitle}</strong>
-            <span class="vuln-cat">{vcat}</span>
+            <h3>{vtitle}</h3>
+          </div>
+          <div class="vuln-key-facts">
+            <div><span class="fact-label">취약점 종류</span><strong>{vcat}</strong></div>
+            <div><span class="fact-label">검증 상태</span><strong>{vstatus}</strong></div>
+            <div class="vuln-location"><span class="fact-label">코드 위치</span>
+              <code>{_esc(location_path)}</code>
+              {f'<span class="location-position">{_esc(location_position)}</span>' if location_position else ''}
+            </div>
           </div>
           <dl class="vuln-dl">
-            <dt>코드 위치</dt><dd><code>{vlocation}</code></dd>
             <dt>설명</dt><dd>{vdesc}</dd>
             {f'<dt>근거</dt><dd>{vevid}</dd>' if vevid else ''}
             {f'<dt>해석</dt><dd>{vinfer}</dd>' if vinfer else ''}
             {f'<dt>영향</dt><dd>{vimp}</dd>' if vimp else ''}
             <dt>권고</dt><dd>{vrec}</dd>
-            <dt>검증 상태</dt><dd>{vstatus}</dd>
             {research_rows}
             {f'<dt>출처</dt><dd><code>{vsrc}</code> / <code>{vfinding}</code></dd>' if vsrc else ''}
           </dl>
-        </div>"""
+        </article>"""
 
     # 주요 발견사항
     key_findings_html = ""
@@ -534,9 +574,8 @@ def _render_html(data: dict, report: dict) -> str:
 
     template = Template((REPORT_ASSETS / "report.html").read_text(encoding="utf-8"))
     vuln_table = (
-        '<table><thead><tr><th>#</th><th>심각도</th><th>발견사항</th><th>코드 위치</th>'
-        '<th>분류</th><th>출처 태스크</th><th>검증 상태</th></tr></thead><tbody>'
-        + vuln_rows + '</tbody></table>'
+        '<ol class="finding-list" aria-label="심각도 순 발견사항">'
+        + vuln_rows + '</ol>'
         if vulns else '<p class="empty">기록된 의심 위치 없음</p>'
     )
     return template.substitute({
@@ -556,9 +595,7 @@ def _render_html(data: dict, report: dict) -> str:
         "candidate_count": report.get("candidate_count", 0),
         "goal_audit_html": goal_audit_html,
         "specialist_html": specialist_html, "pipeline_html": pipeline_html,
-        "critical_count": sev_counts["critical"], "high_count": sev_counts["high"],
-        "medium_count": sev_counts["medium"], "low_count": sev_counts["low"],
-        "info_count": sev_counts["info"], "vuln_table": vuln_table,
+        "severity_summary": severity_summary, "vuln_table": vuln_table,
         "vuln_cards": vuln_cards or '<p class="empty">상세 분석 자료 없음</p>',
         "attack_surface": attack_surface or "확인된 자료 없음",
         "components_html": components_html,
