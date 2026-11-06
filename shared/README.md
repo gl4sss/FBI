@@ -34,6 +34,17 @@ flowchart LR
 - `mcp_manager.py`: 설정된 MCP 서버 등록
 - `external_tools.py`: 대상 유형과 명령 alias를 해석하고 설치된 실행 파일 확인
 
-프로젝트 루트의 `tool_catalog.json.example`은 `firmware_image`, `nested_image`, `squashfs`, `hexagon_elf` 같은 대상 유형을 명령 alias에 대응시킵니다. 각 alias에는 실행 파일, 인자와 자동·수동 사용 여부가 있습니다. 개인별 명령 경로와 매핑은 Git에서 제외되는 `tool_catalog.json`의 `aliases` 또는 `targets` 항목으로 덮어쓸 수 있습니다. `python3 -m shared.external_tools`로 설치 상태를 확인할 수 있습니다. 자동 도구는 추출기에서 직접 실행하거나 Investigator 워커의 대상별 도구 안내에 포함됩니다. 수동 도구는 설치되어 있어도 워커가 자동 실행하지 않습니다.
+프로젝트 루트의 `tool_catalog.json.example`은 `firmware_image`, `nested_image`, `squashfs`, `hexagon_elf`, `xtensa_elf`, `mbn_image`, `unidentified_elf` 같은 대상 유형을 명령 alias에 대응시킵니다. 각 alias에는 실행 파일, 인자와 자동·수동 사용 여부가 있습니다. 개인별 명령 경로와 매핑은 Git에서 제외되는 `tool_catalog.json`의 `aliases` 또는 `targets` 항목으로 덮어쓸 수 있습니다. `python3 -m shared.external_tools`로 설치 상태를 확인할 수 있습니다. 자동 도구는 추출기에서 직접 실행하거나 Investigator 워커의 대상별 도구 안내에 포함됩니다. 수동 도구는 설치되어 있어도 워커가 자동 실행하지 않습니다.
+
+macOS에서는 `brew install llvm radare2 ghidra`로 해당 분석 도구를 설치할 수 있습니다. Xtensa ELF는 radare2로 명령어를 확인하고, Hexagon ELF는 LLVM `llvm-objdump`와 Ghidra에서 검토합니다. `rabin2`는 MBN과 ELF의 형식 정보를 확인합니다. Ghidra는 두 아키텍처를 지원하지만 프로젝트 생성과 프로세서 선택이 필요해 수동 도구로 분류합니다. 식별되지 않은 ELF에는 명령어 디코딩 성공을 가정하지 않습니다. 암호화된 볼륨은 이 도구만으로 내부 파일을 읽을 수 없습니다.
+
+Ghidra GUI는 `ghidraRun`으로 실행합니다. 명령줄에서 일회성 분석을 할 때는 Homebrew의 JDK 25 경로를 지정하고 임시 프로젝트를 사용합니다.
+
+```bash
+JAVA_HOME=/opt/homebrew/opt/openjdk@25/libexec/openjdk.jdk/Contents/Home \
+  /opt/homebrew/opt/ghidra/libexec/support/analyzeHeadless \
+  /tmp/fbi-ghidra-project probe -import path/to/image.mbn \
+  -analysisTimeoutPerFile 60 -deleteProject
+```
 
 오케스트레이터의 호출은 `medium`, 분석 작업의 호출은 `high`를 기본으로 사용합니다. 호출 결과와 세션 ID는 각 단계의 로그에 저장됩니다.

@@ -200,9 +200,9 @@ class Coordinator:
             result = redact_record(
                 worker.execute(task, session_id, firmware_path, extracted_dir), secret_values)
             validate_specialist_scope(result, extracted_dir, task.get("scope_files"))
-            self.state.finish("specialist", key,
-                              "complete" if result.get("status") == "completed" else "failed",
-                              result)
+            state_status = {"completed": "complete", "partial": "partial",
+                            "failed": "failed"}[result["status"]]
+            self.state.finish("specialist", key, state_status, result)
             return result
 
     def _specialist_identity(self, task: dict) -> tuple[str, dict]:
@@ -225,9 +225,9 @@ class Coordinator:
         with self.state.claim("specialist", key, payload) as lease:
             if lease is None:
                 return safe_result
-            self.state.finish("specialist", key,
-                              "complete" if safe_result.get("status") == "completed" else "failed",
-                              safe_result)
+            state_status = {"completed": "complete", "partial": "partial",
+                            "failed": "failed"}[safe_result["status"]]
+            self.state.finish("specialist", key, state_status, safe_result)
         return safe_result
 
     def _submit_detective(self, key: str, handoff: dict) -> None:

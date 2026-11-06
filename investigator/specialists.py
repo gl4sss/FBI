@@ -1,5 +1,6 @@
-"""Fixed specialist catalog and local, conservative file routing."""
+"""Fixed specialist catalog with full binary coverage and text clue routing."""
 
+import codecs
 import hashlib
 import re
 from collections import deque
@@ -21,6 +22,12 @@ SPECIALISTS = (
 )
 
 _NATIVE = {".elf", ".so", ".exe", ".dll", ".o", ".a", ".wasm"}
+_BINARY_SUFFIXES = _NATIVE | {
+    ".bin", ".img", ".fw", ".rom", ".trx", ".ubi", ".ubifs",
+    ".sfs", ".sqfs", ".squashfs", ".ext4", ".mbn", ".dtb",
+    ".apk", ".jar", ".class", ".dex", ".deb", ".rpm",
+    ".zip", ".gz", ".xz", ".lzma", ".bz2", ".7z",
+}
 _C_SOURCE = {".c", ".cc", ".cpp", ".h", ".hpp"}
 _SCRIPT = {".sh", ".bash", ".cgi", ".php", ".py", ".pl", ".lua",
            ".js", ".asp", ".aspx", ".jsp", ".rb", ".tcl", ".ps1"}
@@ -28,10 +35,34 @@ _WEB = {".cgi", ".php", ".js", ".html", ".htm", ".asp", ".aspx", ".jsp"}
 _PACKAGE = {".apk", ".jar", ".class", ".dex", ".deb", ".rpm"}
 _COMPONENT_NAMES = ("busybox", "openssl", "libcurl", "dropbear", "lighttpd",
                     "dnsmasq", "nginx", "libssl", "libcrypto", "uhttpd")
+_CONTROL_TABLE = bytes(1 if byte < 32 and byte not in (9, 10, 12, 13) else 0
+                       for byte in range(256))
 
 
 def prompt_version(specialist_id: str) -> str:
     return hashlib.sha256((PROMPT_DIR / f"{specialist_id}.md").read_bytes()).hexdigest()[:12]
+
+
+def _is_binary(entry: dict, sample: bytes) -> bool:
+    """Classify opaque files conservatively so they receive every specialist review."""
+    if Path(entry["path"]).suffix.lower() in _BINARY_SUFFIXES:
+        return True
+    if sample.startswith((b"\x7fELF", b"MZ", b"\x00asm", b"PK\x03\x04")):
+        return True
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    try:
+        with Path(entry["path"]).open("rb") as stream:
+            chunk = sample
+            stream.seek(len(sample))
+            while chunk:
+                if b"\x01" in chunk.translate(_CONTROL_TABLE):
+                    return True
+                decoder.decode(chunk)
+                chunk = stream.read(65536)
+            decoder.decode(b"", final=True)
+    except (OSError, UnicodeDecodeError):
+        return True
+    return False
 
 
 def _clues(entry: dict, sample: bytes) -> dict[str, str]:
@@ -94,7 +125,7 @@ def _clues(entry: dict, sample: bytes) -> dict[str, str]:
 
 
 def plan_specialists(inventory: list[dict], extracted_dir: str | Path) -> tuple[list[dict], dict]:
-    """Route files without model calls; keep a reason for every inventory entry."""
+    """Assign every binary to every domain; route text files by local clues."""
     root = Path(extracted_dir).resolve()
     prompts = {identifier: (PROMPT_DIR / f"{identifier}.md").read_text(encoding="utf-8")
                for identifier, _ in SPECIALISTS}
@@ -120,10 +151,14 @@ def plan_specialists(inventory: list[dict], extracted_dir: str | Path) -> tuple[
             routing.append({"path": entry["path"], "status": "unreadable",
                             "reason": str(exc), "specialists": []})
             continue
-        selected = _clues(entry, sample)
+        binary = _is_binary(entry, sample)
+        selected = ({identifier: "full binary review" for identifier, _ in SPECIALISTS}
+                    if binary else _clues(entry, sample))
         routing.append({"path": entry["path"],
                         "status": "scheduled" if selected else "no_applicable_clue",
-                        "reason": "" if selected else "No relevant clue in local metadata and bounded sample",
+                        "reason": ("Every specialist reviews this binary" if binary else
+                                   "" if selected else
+                                   "No relevant clue in local metadata and bounded sample"),
                         "specialists": list(selected)})
         for identifier, _ in SPECIALISTS:
             if identifier not in selected:
@@ -138,8 +173,14 @@ def plan_specialists(inventory: list[dict], extracted_dir: str | Path) -> tuple[
                 "scope_files": [entry["path"]], "scope_types": {entry["path"]: entry["type"]},
                 "routing_reason": selected[identifier],
                 "prompt": prompts[identifier] +
-                          f"\n\nRouting clue: {selected[identifier]}. Inspect only the scoped file "
-                          "and directly relevant callers or configuration.\n",
+                          ("\n\nReview this binary for your assigned specialty even if its "
+                           "filename and sampled strings provide no clue. Inspect the "
+                           "whole scoped binary using relevant disassembly, metadata, "
+                           "and directly related callers or configuration. Record "
+                           "coverage limits and return no finding when the evidence "
+                           "does not support one.\n" if binary else
+                           f"\n\nRouting clue: {selected[identifier]}. Inspect only the scoped file "
+                           "and directly relevant callers or configuration.\n"),
             })
     specialists = [
         {"id": identifier, "name": title, "prompt_version": versions[identifier],

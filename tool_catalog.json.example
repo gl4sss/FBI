@@ -22,10 +22,22 @@
       "purpose": "Disassemble Qualcomm Hexagon ELF code",
       "mode": "automatic"
     },
+    "xtensa_disassemble": {
+      "binary": "r2",
+      "args": ["-q", "-e", "scr.color=false", "-a", "xtensa", "-b", "32", "-c", "s entry0; pd 32", "{input_file}"],
+      "purpose": "Inspect Xtensa ELF instructions at the entry point",
+      "mode": "automatic"
+    },
+    "mbn_inspect": {
+      "binary": "rabin2",
+      "args": ["-Ij", "{input_file}"],
+      "purpose": "Identify ELF and Qualcomm MBN image metadata",
+      "mode": "automatic"
+    },
     "ghidra_review": {
       "binary": "ghidraRun",
       "args": [],
-      "purpose": "Open a Hexagon ELF for interactive code review",
+      "purpose": "Review Xtensa or Hexagon code in Ghidra",
       "mode": "manual"
     }
   },
@@ -33,6 +45,9 @@
     "firmware_image": ["binwalk_extract"],
     "nested_image": ["binwalk_extract"],
     "squashfs": ["squashfs_extract"],
-    "hexagon_elf": ["hexagon_disassemble", "ghidra_review"]
+    "hexagon_elf": ["hexagon_disassemble", "mbn_inspect", "ghidra_review"],
+    "xtensa_elf": ["xtensa_disassemble", "mbn_inspect", "ghidra_review"],
+    "mbn_image": ["mbn_inspect", "ghidra_review"],
+    "unidentified_elf": ["mbn_inspect", "ghidra_review"]
   }
 }

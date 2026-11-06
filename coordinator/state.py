@@ -87,8 +87,9 @@ class StateStore:
         self.enqueue(kind, key, payload)
         with self._connect() as connection:
             connection.execute(
-                "UPDATE jobs SET status='running',attempts=attempts+1,updated_at=? "
-                "WHERE kind=? AND key=?", (time.time(), kind, key)
+                "UPDATE jobs SET status='running',payload=?,attempts=attempts+1,updated_at=? "
+                "WHERE kind=? AND key=?",
+                (json.dumps(payload, ensure_ascii=False), time.time(), kind, key)
             )
 
     def get(self, kind: str, key: str) -> dict | None:

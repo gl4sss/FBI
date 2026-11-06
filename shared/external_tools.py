@@ -15,6 +15,9 @@ SQUASHFS_MAGIC = (b"hsqs", b"sqsh", b"qshs", b"shsq")
 IMAGE_SUFFIXES = {".img", ".bin", ".fw", ".rom", ".trx", ".ubi",
                   ".fat", ".ext4", ".sfs", ".sqfs", ".squashfs"}
 HEXAGON_MACHINE = 164
+XTENSA_MACHINE = 94
+COMMAND_GUIDANCE_ALIASES = {"hexagon_disassemble", "xtensa_disassemble", "mbn_inspect"}
+DISASSEMBLY_ALIASES = {"hexagon_disassemble", "xtensa_disassemble"}
 
 
 def load_catalog() -> dict:
@@ -72,9 +75,15 @@ def target_for_file(path: str | Path) -> str | None:
     if header[:4] == b"\x7fELF":
         if len(header) >= 20:
             endian = "<" if header[5] == 1 else ">" if header[5] == 2 else None
-            if endian and struct.unpack_from(endian + "H", header, 18)[0] == HEXAGON_MACHINE:
-                return "hexagon_elf"
-        return None
+            if endian:
+                machine = struct.unpack_from(endian + "H", header, 18)[0]
+                if machine == HEXAGON_MACHINE:
+                    return "hexagon_elf"
+                if machine == XTENSA_MACHINE:
+                    return "xtensa_elf"
+        return "unidentified_elf"
+    if file.suffix.lower() == ".mbn":
+        return "mbn_image"
     if file.suffix.lower() in IMAGE_SUFFIXES:
         return "nested_image"
     return None
@@ -103,18 +112,24 @@ def guidance_for_files(paths: list[str]) -> str:
         if item["path"] and item["mode"] == "automatic":
             lines.append(f"{item['target']}: {item['alias']} = {item['path']} ({item['purpose']}).")
         elif item["path"]:
-            lines.append(f"{item['target']}: {item['alias']} is installed but requires manual use.")
+            lines.append(f"{item['target']}: {item['alias']} = {item['path']} "
+                         f"(manual; {item['purpose']}).")
         else:
             lines.append(f"{item['target']}: {item['alias']} is unavailable.")
-    if any(item["alias"] == "hexagon_disassemble" and item["path"]
+    for path in paths:
+        target = target_for_file(path)
+        if not target:
+            continue
+        for item in available_for_target(target, catalog):
+            if item["alias"] not in COMMAND_GUIDANCE_ALIASES or not item["path"]:
+                continue
+            command = command_for(item["alias"], input_file=path, catalog=catalog)
+            if command:
+                lines.append(f"{target} {item['alias']} command: {shlex.join(command)}")
+    if any(item["alias"] in DISASSEMBLY_ALIASES and item["path"]
            for item in entries.values()):
-        for path in paths:
-            if target_for_file(path) == "hexagon_elf":
-                command = command_for("hexagon_disassemble", input_file=path, catalog=catalog)
-                if command:
-                    lines.append(f"Hexagon command: {shlex.join(command)}")
-        lines.append("Run the Hexagon command before reporting that disassembly is unavailable. "
-                     "Cite actual instruction addresses; unknown opcodes are not proof of a flaw.")
+        lines.append("Inspect the decoded instructions and their real addresses before treating a site "
+                     "as verified. Unrecognized opcodes or an unknown ELF machine do not prove a flaw.")
     return "\n".join(lines)
 
 

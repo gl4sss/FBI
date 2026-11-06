@@ -12,6 +12,25 @@ from coordinator.state import StateStore, job_key
 
 
 class DashboardTests(unittest.TestCase):
+    def test_legacy_partial_worker_is_displayed_as_partial(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            directory = Path(temporary_dir) / "state"
+            state = StateStore(directory)
+            key = job_key("partial-worker")
+            state.enqueue("specialist", key, {
+                "task_id": "sp_authz_1", "specialist_id": "authz",
+                "file_path": "/private/auth.c",
+            })
+            state.finish("specialist", key, "failed", {
+                "status": "partial", "analysis": "do-not-display",
+            })
+            snapshot = read_snapshot(directory)
+            authz = next(item for item in snapshot["specialists"] if item["id"] == "authz")
+            self.assertEqual(authz["status"], "partial")
+            self.assertEqual(authz["counts"], {"partial": 1})
+            self.assertEqual(snapshot["stages"]["specialist"], {"partial": 1})
+            self.assertNotIn("do-not-display", json.dumps(snapshot))
+
     def test_confirmed_panel_separates_static_and_reproduced_findings(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             directory = Path(temporary_dir) / "state"
@@ -86,6 +105,14 @@ class DashboardTests(unittest.TestCase):
                            "scope_files": ["/private/secret.conf"]}],
             }))
             state = StateStore(directory)
+            state.start("investigator", job_key("investigator"), {
+                "resume": None, "secret": "do-not-display",
+            })
+            state.start("investigator", job_key("investigator"), {
+                "resume": "/private/previous-session", "secret": "do-not-display",
+            })
+            self.assertEqual(state.get("investigator", job_key("investigator"))["payload"]["resume"],
+                             "/private/previous-session")
             key = job_key("specialist")
             state.start("specialist", key, {
                 "task_id": "sp_secrets_1", "specialist_id": "secrets",
@@ -101,6 +128,11 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(secrets["status"], "running")
             self.assertEqual(snapshot["detectives"][0]["source_specialist"], "secrets")
             self.assertEqual(snapshot["total_files"], 2)
+            self.assertEqual(snapshot["current_run"]["status"], "running")
+            self.assertTrue(snapshot["current_run"]["resumed"])
+            self.assertEqual(snapshot["current_run"]["attempt"], 2)
+            self.assertEqual(snapshot["current_run"]["active_count"], 1)
+            self.assertEqual(snapshot["current_run"]["active_jobs"][0]["file"], "secret.conf")
             self.assertNotIn("do-not-display", json.dumps(snapshot))
             self.assertNotIn("/private/", json.dumps(snapshot))
             state.finish("specialist", key, "complete", {"evidence": "do-not-display"})

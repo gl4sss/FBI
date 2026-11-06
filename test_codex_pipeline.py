@@ -516,6 +516,34 @@ class ExtractionTests(unittest.TestCase):
                                   catalog=catalog)
             self.assertEqual(command, [str(tool.resolve()), "--disassemble", str(target)])
 
+    def test_xtensa_and_raw_mbn_use_target_specific_tool_aliases(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            directory = Path(temporary_dir)
+            xtensa = directory / "modem.mbn"
+            header = bytearray(64)
+            header[:6] = b"\x7fELF\x01\x01"
+            header[18:20] = (94).to_bytes(2, "little")
+            xtensa.write_bytes(header)
+            raw_mbn = directory / "loader.mbn"
+            raw_mbn.write_bytes(b"\0" * 64)
+            unknown = directory / "unknown.elf"
+            header[18:20] = (0xDE3D).to_bytes(2, "little")
+            unknown.write_bytes(header)
+            self.assertEqual(target_for_file(xtensa), "xtensa_elf")
+            self.assertEqual(target_for_file(raw_mbn), "mbn_image")
+            self.assertEqual(target_for_file(unknown), "unidentified_elf")
+            catalog = load_catalog()
+            self.assertIn("xtensa_disassemble", catalog["targets"]["xtensa_elf"])
+            self.assertIn("mbn_inspect", catalog["targets"]["mbn_image"])
+            self.assertIn("ghidra_review", catalog["targets"]["hexagon_elf"])
+            tool = directory / "fake r2"
+            tool.write_text("#!/bin/sh\n")
+            tool.chmod(0o755)
+            catalog["aliases"]["xtensa_disassemble"]["binary"] = str(tool)
+            command = command_for("xtensa_disassemble", input_file=xtensa,
+                                  catalog=catalog)
+            self.assertEqual(command[-3:], ["-c", "s entry0; pd 32", str(xtensa)])
+
     @unittest.skipUnless(shutil.which("mksquashfs") and shutil.which("unsquashfs"),
                          "squashfs tools are not installed")
     def test_nested_squashfs_is_unpacked_into_reviewable_files(self):

@@ -32,7 +32,16 @@ h2 { margin: 0; font-size: 20px; letter-spacing: -.02em; }
 .overview-item { min-height: 82px; padding: 14px 18px; border: 1px solid var(--border); border-radius: 13px; background: var(--panel); }
 .overview-item span { display: block; color: var(--muted); font-size: 12px; }
 .overview-item strong { display: block; overflow: hidden; margin-top: 4px; font-size: 23px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
-.workspace, .detail, .confirmed { border: 1px solid var(--border); border-radius: 16px; background: var(--panel); box-shadow: 0 20px 55px #0002; }
+.workspace, .detail, .confirmed, .current-run { border: 1px solid var(--border); border-radius: 16px; background: var(--panel); box-shadow: 0 20px 55px #0002; }
+.current-run { margin-bottom: 16px; padding: 20px 25px; }
+.current-run.running { border-color: #388b92; background: linear-gradient(125deg, #142f36, var(--panel) 55%); }
+.current-run-head { display: flex; justify-content: space-between; align-items: center; gap: 18px; }
+.current-run-head p:last-child { margin: 5px 0 0; color: var(--muted); font-size: 13px; }
+.current-run-head strong { color: var(--cyan); white-space: nowrap; }
+.current-run-jobs { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 14px; }
+.current-run-job { display: flex; flex-wrap: wrap; gap: 5px 10px; padding: 8px 11px; border: 1px solid #3a7180; border-radius: 9px; background: #102a34; font-size: 13px; }
+.current-run-job span { color: var(--muted); overflow-wrap: anywhere; }
+.current-run-empty { margin: 0; color: var(--muted); font-size: 13px; }
 .graph-head { padding: 21px 25px; border-bottom: 1px solid var(--border); }
 .graph-head p { font-size: 13px; }
 .legend { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 12px; color: var(--muted); font-size: 12px; }
@@ -91,6 +100,7 @@ footer { margin-top: 16px; color: var(--muted); font-size: 12px; text-align: rig
   .overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .masthead, .graph-head, .detail { flex-direction: column; }
   .confirmed-head { align-items: flex-start; flex-direction: column; }
+  .current-run-head { align-items: flex-start; flex-direction: column; }
   .legend { justify-content: flex-start; }
 }
 @media (prefers-reduced-motion: reduce) { .node.running rect { animation: none; } }

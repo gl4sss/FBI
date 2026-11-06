@@ -10,6 +10,7 @@ let latest = null;
 let selected = null;
 let loading = false;
 let confirmedFingerprint = "";
+let currentRunFingerprint = "";
 
 function svg(tag, attrs = {}, parent = graph) {
   const element = document.createElementNS(SVG, tag);
@@ -67,6 +68,43 @@ function stageStatus(items) {
   if (items.some(item => item.status === "partial")) return "partial";
   if (items.some(item => item.status === "pending")) return "pending";
   return "complete";
+}
+
+function renderCurrentRun(data) {
+  const run = data.current_run || {status: "waiting", active_count: 0, active_jobs: []};
+  const fingerprint = JSON.stringify(run);
+  if (fingerprint === currentRunFingerprint) return;
+  currentRunFingerprint = fingerprint;
+  const running = run.status === "running" || run.active_count > 0;
+  document.getElementById("current-run").classList.toggle("running", running);
+  document.getElementById("current-run-title").textContent = run.status === "running"
+    ? (run.resumed ? "기존 세션 이어서 분석 중" : "새 분석 실행 중")
+    : running ? "후속 작업 실행 중" : "저장된 분석 결과";
+  document.getElementById("current-run-meta").textContent = run.started_at
+    ? `${new Date(run.started_at).toLocaleTimeString("ko-KR")} 시작 · ${run.attempt}번째 실행`
+    : running ? "Investigator가 끝난 뒤 후속 작업을 진행하고 있습니다."
+      : "지금 실행 중인 분석이 없습니다. 아래 그래프는 저장된 작업을 표시합니다.";
+  document.getElementById("current-run-count").textContent =
+    `${run.active_count || 0}개 작업 실행 중`;
+  const list = document.getElementById("current-run-jobs");
+  list.replaceChildren();
+  for (const job of run.active_jobs || []) {
+    const item = document.createElement("div");
+    item.className = "current-run-job";
+    const name = document.createElement("strong");
+    name.textContent = job.name;
+    item.appendChild(name);
+    const file = document.createElement("span");
+    file.textContent = job.file || "위치 미기록";
+    item.appendChild(file);
+    list.appendChild(item);
+  }
+  if (!list.childElementCount) {
+    const empty = document.createElement("p");
+    empty.className = "current-run-empty";
+    empty.textContent = running ? "다음 작업을 준비 중입니다." : "";
+    list.appendChild(empty);
+  }
 }
 
 function renderConfirmed(data) {
@@ -129,6 +167,7 @@ function render(data) {
   document.getElementById("updated-at").textContent = new Date(data.observed_at).toLocaleTimeString("ko-KR");
   document.getElementById("connection-label").textContent = "실시간 연결";
   document.getElementById("connection").classList.remove("offline");
+  renderCurrentRun(data);
   renderConfirmed(data);
 
   const visible = data.detectives.slice(0, 12);
@@ -160,7 +199,7 @@ function render(data) {
   data.specialists.forEach((item, index) => {
     const counts = item.counts;
     const meta = item.task_count
-      ? `${counts.running || 0} 실행 · ${counts.pending || 0} 대기 · ${counts.complete || 0} 완료 · ${counts.failed || 0} 실패`
+      ? `${counts.running || 0} 실행 · ${counts.pending || 0} 대기 · ${counts.complete || 0} 완료 · ${counts.partial || 0} 부분 · ${counts.failed || 0} 실패`
       : statusNames[item.status];
     node(35, 120 + index * 68, 325, item.name, meta, item.status,
          item.task_count

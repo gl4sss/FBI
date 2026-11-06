@@ -224,7 +224,7 @@ def run_analysis(firmware_path: str, settings: dict, resume_from: str | None = N
     parallel_limit = cfg_worker["parallel_limit"]
     if parallel_limit < 1:
         raise ValueError("worker.parallel_limit must be positive")
-    specialist_task_limit = int(cfg_analysis.get("max_specialist_tasks_per_run", 60))
+    specialist_task_limit = int(cfg_analysis.get("max_specialist_tasks_per_run", 0))
     if specialist_task_limit < 0:
         raise ValueError("analysis.max_specialist_tasks_per_run must be nonnegative")
     research_minutes = float(cfg_analysis.get("research_minutes", 0))
@@ -407,6 +407,8 @@ def run_analysis(firmware_path: str, settings: dict, resume_from: str | None = N
     goal_prompt = logger.get_session_path() / "GOAL_PROMPT.txt"
     specialist_goal = (
         "Use the fixed specialist catalog and file routing in scan_scope.json. "
+        "Each extracted binary is assigned to every specialist for an independent "
+        "review in that specialist's domain, even without a local routing clue. "
         "A no_applicable_clue routing decision is a local heuristic, not proof that a file is safe. "
         "Use task_results.jsonl and research_status.json to identify unfinished specialist "
         "work; preserve each finding's disposition and separate static evidence from "

@@ -82,24 +82,31 @@ class SpecialistRoutingTests(unittest.TestCase):
             self.assertTrue(all(task["specialist_id"] in task["task_id"] for task in tasks))
             self.assertEqual(len(scope["specialists"]), 10)
 
-    def test_unrelated_data_needs_no_specialist_model_call(self):
+    def test_unrelated_text_needs_no_specialist_model_call(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)
-            (root / "payload.dat").write_bytes(b"\x00\x01\x02")
+            (root / "payload.dat").write_text("ordinary text data\n")
             tasks, scope = plan_specialists(file_inventory(root), root)
             self.assertEqual(tasks, [])
             self.assertEqual(scope["file_routing"][0]["status"], "no_applicable_clue")
             self.assertTrue(all(item["status"] == "no_applicable_clue"
                                 for item in scope["specialists"]))
 
-    def test_generic_native_binary_does_not_trigger_component_lookup(self):
+    def test_every_binary_is_assigned_to_every_specialist(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)
             (root / "app.elf").write_bytes(b"\x7fELF\x00generic local application")
-            tasks, _ = plan_specialists(file_inventory(root), root)
-            owners = {task["specialist_id"] for task in tasks}
-            self.assertIn("memory_safety", owners)
-            self.assertNotIn("components", owners)
+            (root / "opaque.dat").write_bytes(b"\x01\x02unidentified binary")
+            (root / "late.dat").write_bytes(b"a" * 70000 + b"\x00")
+            tasks, scope = plan_specialists(file_inventory(root), root)
+            expected = {identifier for identifier, _ in SPECIALISTS}
+            for path in (root / "app.elf", root / "opaque.dat", root / "late.dat"):
+                assigned = [task for task in tasks if task["scope_files"] == [str(path.resolve())]]
+                self.assertEqual({task["specialist_id"] for task in assigned}, expected)
+                self.assertEqual(len(assigned), len(expected))
+                self.assertTrue(all("even if" in task["prompt"] for task in assigned))
+            self.assertTrue(all(item["status"] == "scheduled"
+                                for item in scope["file_routing"]))
 
     def test_large_unclassified_data_is_kept_for_review(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
@@ -333,7 +340,7 @@ class CoordinatorTests(unittest.TestCase):
             def fake_extract(path, session_dir, sha, timeout=300):
                 extracted = Path(session_dir) / "extracted"
                 extracted.mkdir(exist_ok=True)
-                (extracted / "payload.dat").write_bytes(b"\x00\x01")
+                (extracted / "payload.dat").write_text("ordinary text data\n")
                 return {"status": "complete", "output_dir": str(extracted),
                         "file_count": 1}
 
@@ -634,9 +641,10 @@ class CoordinatorTests(unittest.TestCase):
                  patch("investigator.main.Worker.execute", fake_worker), \
                  patch("report_generator.generate_report", return_value="report.html"), \
                  redirect_stdout(io.StringIO()):
-                coordinator.run()
+                first = coordinator.run()
                 restarted = Coordinator(firmware, root / "state", no_qemu=True)
                 restarted.run()
+            self.assertEqual(first["specialist"]["partial"], 1)
             self.assertEqual(len(calls), 2)
             self.assertEqual(restarted.state.list_jobs("specialist")[0]["status"], "complete")
             self.assertEqual(restarted.state.list_jobs("specialist")[0]["attempts"], 2)
@@ -670,7 +678,7 @@ class CoordinatorTests(unittest.TestCase):
                 worker, task, None, str(firmware), str(extracted))
             key, _ = coordinator._specialist_identity(task)
             self.assertEqual(first["status"], "partial")
-            self.assertEqual(coordinator.state.get("specialist", key)["status"], "failed")
+            self.assertEqual(coordinator.state.get("specialist", key)["status"], "partial")
             second = coordinator._run_specialist_task(
                 worker, task, None, str(firmware), str(extracted))
             self.assertEqual(second["status"], "completed")
@@ -682,7 +690,7 @@ class CoordinatorTests(unittest.TestCase):
             firmware = root / "fixture.bin"
             firmware.write_bytes(b"synthetic firmware")
             coordinator = Coordinator(firmware, root / "state", no_qemu=True,
-                                      max_specialist_tasks=1)
+                                      max_specialist_tasks=9)
             info = {"path": str(firmware), "filename": firmware.name,
                     "file_type": "data", "size_bytes": firmware.stat().st_size,
                     "hashes": {"sha256": coordinator.firmware_sha256, "md5": "fixture"},
@@ -711,14 +719,14 @@ class CoordinatorTests(unittest.TestCase):
                 research = json.loads((Path(coordinator.investigator_session) /
                                        "research_status.json").read_text())
                 self.assertEqual(research["stop_reason"], "specialist_task_budget_reached")
-                self.assertEqual(research["specialist_tasks_pending"], 1)
+                self.assertEqual(research["specialist_tasks_pending"], 3)
                 self.assertEqual(coordinator.state.summary()["investigator"]["partial"], 1)
                 restarted = Coordinator(firmware, root / "state", no_qemu=True,
-                                        max_specialist_tasks=1)
+                                        max_specialist_tasks=9)
                 restarted.run()
-            self.assertEqual(len(calls), 2)
-            self.assertEqual(len(set(calls)), 2)
-            self.assertEqual(restarted.state.summary()["specialist"]["complete"], 2)
+            self.assertEqual(len(calls), 10)
+            self.assertEqual(len(set(calls)), 10)
+            self.assertEqual(restarted.state.summary()["specialist"]["complete"], 10)
             self.assertEqual(restarted.state.summary()["investigator"]["complete"], 1)
 
     def test_crash_between_codex_log_and_task_state_is_reconciled(self):
@@ -915,7 +923,7 @@ class CoordinatorTests(unittest.TestCase):
                 summary = Coordinator(firmware, root / "state", no_qemu=True).run()
             self.assertTrue(detective_started.is_set())
             self.assertTrue(any(path.endswith("a.sh") for path in inspected))
-            self.assertFalse(any(path.endswith("c.dat") for path in inspected))
+            self.assertEqual(sum(path.endswith("c.dat") for path in inspected), len(SPECIALISTS))
             self.assertEqual(summary["detective"]["complete"], 1)
             self.assertEqual(report_call.call_count, 1)
 

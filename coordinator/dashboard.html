@@ -29,11 +29,23 @@
       <div class="overview-item"><span>최근 갱신</span><strong id="updated-at">—</strong></div>
     </section>
 
+    <section class="current-run" id="current-run" aria-labelledby="current-run-title">
+      <div class="current-run-head">
+        <div>
+          <p class="eyebrow">현재 분석</p>
+          <h2 id="current-run-title">실행 상태 확인 중</h2>
+          <p id="current-run-meta">작업 상태를 읽고 있습니다.</p>
+        </div>
+        <strong id="current-run-count">0개 작업 실행 중</strong>
+      </div>
+      <div id="current-run-jobs" class="current-run-jobs" aria-live="polite"></div>
+    </section>
+
     <section class="workspace" aria-label="작업 흐름">
       <div class="graph-head">
         <div>
           <h2>실시간 작업 흐름</h2>
-          <p>선은 전담 분야에서 생성된 Detective 작업을 나타냅니다. 그래프 안에서 스크롤해 전체 작업을 보고, 작업을 선택하면 세부 상태를 볼 수 있습니다.</p>
+          <p>이 그래프에는 이전 실행의 저장된 작업도 함께 표시됩니다. 그래프 안에서 스크롤해 전체 작업을 보고, 작업을 선택하면 세부 상태를 볼 수 있습니다.</p>
         </div>
         <div class="legend" aria-label="상태 범례">
           <span><i class="legend-dot running"></i>실행 중</span>

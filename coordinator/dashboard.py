@@ -68,6 +68,13 @@ def _read_jobs(database: Path) -> list[dict]:
             result = json.loads(raw_result) if kind in {"finding", "detective"} else None
         except (TypeError, ValueError):
             result = None
+        if kind == "specialist" and status == "failed" and raw_result:
+            try:
+                saved = json.loads(raw_result)
+            except (TypeError, ValueError):
+                saved = None
+            if isinstance(saved, dict) and saved.get("status") == "partial":
+                status = "partial"
         jobs.append({"kind": kind, "key": key, "status": status,
                      "payload": payload if isinstance(payload, dict) else {},
                      "result": result if isinstance(result, dict) else {},
@@ -178,12 +185,14 @@ def read_snapshot(state_dir: str | Path) -> dict:
             status = "running"
         elif counts["failed"]:
             status = "failed"
+        elif counts["partial"]:
+            status = "partial"
         elif counts["pending"]:
             status = "pending"
         else:
             status = "complete"
         visible = sorted(tasks, key=lambda item: (
-            {"running": 0, "failed": 1, "pending": 2, "complete": 3}.get(
+            {"running": 0, "failed": 1, "partial": 2, "pending": 3, "complete": 4}.get(
                 item["status"], 4), item["id"]))[:30]
         specialists.append({"id": identifier, "name": name, "status": status,
                             "counts": dict(counts), "task_count": len(tasks),
@@ -210,6 +219,32 @@ def read_snapshot(state_dir: str | Path) -> dict:
         counts = Counter(job["status"] for job in jobs if job["kind"] == kind)
         stages[kind] = dict(counts)
     investigator = next((job for job in jobs if job["kind"] == "investigator"), None)
+    specialist_names = dict(SPECIALISTS)
+    active_jobs = []
+    for job in jobs:
+        if job["status"] != "running" or job["kind"] not in {"specialist", "detective"}:
+            continue
+        payload = job["payload"]
+        active_jobs.append({
+            "kind": job["kind"],
+            "name": (specialist_names.get(payload.get("specialist_id"), "전담 조사")
+                     if job["kind"] == "specialist" else "Detective"),
+            "file": Path(payload.get("file_path") or "").name,
+            "attempts": job["attempts"],
+            "updated_at": job["updated_at"],
+        })
+    active_jobs.sort(key=lambda item: -item["updated_at"])
+    for item in active_jobs:
+        item.pop("updated_at")
+    current_run = {
+        "status": investigator["status"] if investigator else "waiting",
+        "resumed": (investigator["attempts"] > 1 or
+                    bool(investigator["payload"].get("resume"))) if investigator else False,
+        "attempt": investigator["attempts"] if investigator else 0,
+        "started_at": (datetime.fromtimestamp(investigator["updated_at"], timezone.utc).isoformat()
+                       if investigator and investigator["status"] == "running" else None),
+        "active_count": len(active_jobs), "active_jobs": active_jobs[:20],
+    }
     confirmed_count, confirmed = _confirmed_vulnerabilities(jobs)
     return {
         "firmware_id": directory.name[:12],
@@ -217,6 +252,7 @@ def read_snapshot(state_dir: str | Path) -> dict:
         "scope_ready": bool(scope), "total_files": len(scope.get("inventory", [])),
         "extraction_ready": bool(manifest.get("extracted_dir")),
         "investigator_status": investigator["status"] if investigator else "waiting",
+        "current_run": current_run,
         "specialists": specialists, "detectives": detectives,
         "confirmed_count": confirmed_count, "confirmed_vulnerabilities": confirmed,
         "lab": [{"id": job["key"][:12], "status": job["status"]}
